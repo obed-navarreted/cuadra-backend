@@ -1,0 +1,75 @@
+spring:
+  application:
+    name: cuadra-api
+  autoconfigure:
+    exclude: org.springframework.boot.security.autoconfigure.UserDetailsServiceAutoConfiguration
+  datasource:
+    # DB_* para desarrollo local; PG* se reconoce automáticamente (Railway).
+    url: ${DB_URL:jdbc:postgresql://${PGHOST:localhost}:${PGPORT:5435}/${PGDATABASE:cuadra}?sslmode=${PGSSLMODE:prefer}&ApplicationName=cuadra-api}
+    username: ${DB_USER:${PGUSER:cuadra}}
+    password: ${DB_PASSWORD:${PGPASSWORD:cuadra}}
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX:10}
+      minimum-idle: ${DB_POOL_MIN:2}
+      connection-timeout: 5000
+  flyway:
+    enabled: true
+  threads:
+    virtual:
+      enabled: true
+  mvc:
+    problemdetails:
+      enabled: true
+
+server:
+  port: ${PORT:8086}
+  shutdown: graceful
+  forward-headers-strategy: framework
+  compression:
+    enabled: true
+
+# El contrato OpenAPI solo se genera en pruebas (docs/openapi.json); en producción no se expone.
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+cuadra:
+  cors:
+    # Orígenes del panel web que pueden llamar a la API desde el navegador (coma). El valor de desarrollo NO sirve en producción:
+    # allí hay que fijar CUADRA_CORS_ORIGINS (p. ej. https://TU-USUARIO.github.io) o la API no arranca (ProductionGuard).
+    allowed-origins: ${CUADRA_CORS_ORIGINS:http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173}
+  session-ttl-app: ${CUADRA_SESSION_TTL_APP:P60D}
+  session-ttl-web: ${CUADRA_SESSION_TTL_WEB:P14D}
+  pin-bcrypt-strength: ${CUADRA_PIN_BCRYPT_STRENGTH:12}
+  google:
+    # IDs de cliente OAuth aceptados como `aud` del ID token (web y Android), separados por coma.
+    client-ids: ${GOOGLE_CLIENT_IDS:}
+  support:
+    inbox-email: ${SUPPORT_INBOX_EMAIL:ndiazobed@gmail.com}
+  platform:
+    admin-emails: ${PLATFORM_ADMIN_EMAILS:ndiazobed@gmail.com}
+    # Acceso con usuario y contraseña a la consola. SOLO el hash bcrypt, y solo por entorno (nunca escribirlos aquí).
+    admin-user: ${PLATFORM_ADMIN_USER:}
+    admin-password-hash: ${PLATFORM_ADMIN_PASSWORD_HASH:}
+  app:
+    base-url: ${APP_BASE_URL:http://localhost:5173}
+    min-app-version: ${MIN_APP_VERSION:0}
+    # Donaciones por PayPal (enlace externo; la app de Google Play NO lo muestra: política de pagos). Se puede cambiar u ocultar desde la consola.
+    donation-url: ${DONATION_URL:https://www.paypal.com/donate/?business=ndiazobed%40gmail.com&currency_code=USD&item_name=Apoyo+a+Cuadra}
+    donation-mode: ${DONATION_MODE:external_link}
+
+logging:
+  level:
+    com.cuadra: INFO
