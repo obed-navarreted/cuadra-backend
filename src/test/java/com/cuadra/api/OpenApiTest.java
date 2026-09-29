@@ -45,7 +45,10 @@ class OpenApiTest extends ApiTestBase {
         JsonMapper mapper = JsonMapper.builder().enable(SerializationFeature.INDENT_OUTPUT).enable(tools.jackson.databind.SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS).build();
         Object tree = mapper.readValue(json, Object.class);
         String pretty = mapper.writeValueAsString(tree) + "\n";
-        Path file = Path.of("..", "docs", "openapi.json");
-        if (!Files.exists(file) || !Files.readString(file).equals(pretty)) Files.writeString(file, pretty);
+        // El contrato vive en el repositorio del backend; en el monorepo local además se copia a ../docs para generar el cliente del panel.
+        Path own = Path.of("openapi.json");
+        if (!Files.exists(own) || !Files.readString(own).equals(pretty)) Files.writeString(own, pretty);
+        Path shared = Path.of("..", "docs", "openapi.json");
+        if (Files.isDirectory(shared.getParent()) && (!Files.exists(shared) || !Files.readString(shared).equals(pretty))) Files.writeString(shared, pretty);
     }
 }

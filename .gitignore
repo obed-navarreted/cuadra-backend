@@ -2,3 +2,6 @@ target/
 *.log
 .api.pid
 .env
+.env.local
+.env.*
+backups/

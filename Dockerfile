@@ -14,7 +14,8 @@ WORKDIR /app
 COPY --from=build --chown=cuadra:cuadra /workspace/target/cuadra-api-*.jar app.jar
 
 USER cuadra
-EXPOSE 8086
+ENV PORT=8080
+EXPOSE 8080
 
 # La zona horaria del servidor es UTC: cada negocio tiene la suya y se calcula con java.time.
 ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75.0", "-Duser.timezone=UTC", "-jar", "/app/app.jar"]
