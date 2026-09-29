@@ -26,10 +26,12 @@ public class ProductService {
 
     private final JdbcClient jdbc;
     private final Audit audit;
+    private final tools.jackson.databind.json.JsonMapper mapper;
 
-    public ProductService(JdbcClient jdbc, Audit audit) {
+    public ProductService(JdbcClient jdbc, Audit audit, tools.jackson.databind.json.JsonMapper mapper) {
         this.jdbc = jdbc;
         this.audit = audit;
+        this.mapper = mapper;
     }
 
     public record ProductInput(String barcode, String shortCode, String name, String variant, UUID categoryId, String unit,
@@ -55,7 +57,9 @@ public class ProductService {
         if (existing.isEmpty() && jdbc.sql("SELECT count(*) FROM product WHERE id = :id").param("id", id).query(Integer.class).single() > 0) {
             throw ApiException.conflict("ID_TAKEN", "Id already in use");
         }
-        ctx.require(existing.isPresent() ? Permission.MANAGE_CATALOG : Permission.SELL);
+        // Agregar y modificar lo hace quien atiende la caja (con historial); dar de baja o reactivar, solo admin y dueño.
+        ctx.require(existing.isPresent() ? Permission.EDIT_PRODUCTS : Permission.SELL);
+        if (existing.isPresent() && existing.get().active() != (p.active() == null || p.active())) ctx.require(Permission.MANAGE_CATALOG);
         if (p.categoryId() != null && jdbc.sql("SELECT count(*) FROM category WHERE id = :c AND business_id = :b")
                 .param("c", p.categoryId()).param("b", ctx.businessId()).query(Integer.class).single() == 0) {
             throw ApiException.badRequest("INVALID_CATEGORY", "Category not found");
@@ -78,7 +82,7 @@ public class ProductService {
                         .param("track", Boolean.TRUE.equals(p.trackStock())).param("min", p.minStockMilli(), java.sql.Types.BIGINT)
                         .param("active", active).update();
                 priceHistory(ctx, id, p.priceMinor(), p.costMinor());
-                audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "product.create", "product", id, p.name());
+                audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "product.create", "product", id, createdDetail(p));
                 return new Result(get(ctx.businessId(), id), Outcome.CREATED);
             }
             ProductView cur = existing.get();
@@ -101,7 +105,7 @@ public class ProductService {
             if (cur.priceMinor() != p.priceMinor() || !java.util.Objects.equals(cur.costMinor(), p.costMinor())) {
                 priceHistory(ctx, id, p.priceMinor(), p.costMinor());
             }
-            audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "product.update", "product", id, p.name());
+            audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "product.update", "product", id, changesDetail(cur, p, active));
             return new Result(get(ctx.businessId(), id), Outcome.UPDATED);
         } catch (DuplicateKeyException e) {
             if (com.cuadra.api.common.Constraints.isPrimaryKey(e)) throw ApiException.conflict("ID_TAKEN", "Id already in use"); // id de otro negocio (invisible por RLS)
@@ -116,7 +120,7 @@ public class ProductService {
         int n = jdbc.sql("UPDATE product SET active = false, updated_at = now(), rev = nextval('change_rev_seq') WHERE id = :id AND business_id = :b AND active")
                 .param("id", id).param("b", ctx.businessId()).update();
         if (n == 0 && find(ctx.businessId(), id).isEmpty()) throw ApiException.notFound("PRODUCT_NOT_FOUND", "Product not found");
-        audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "product.deactivate", "product", id, null);
+        audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "product.deactivate", "product", id, "{\"changes\":{\"active\":{\"from\":true,\"to\":false}}}");
     }
 
     public ProductView get(UUID businessId, UUID id) {
@@ -206,6 +210,94 @@ public class ProductService {
                 .param("m", ctx.memberId()).update();
     }
 
+    // ---------- historial (quién cambió qué) ----------
+
+    public record ProductFieldChange(Object from, Object to) {}
+
+    public record ProductHistoryEntry(long id, String action, UUID actorMemberId, String actorName, String actorRole, Instant at,
+                                      Map<String, ProductFieldChange> changes, String name) {}
+
+    private String createdDetail(ProductInput p) {
+        Map<String, Object> d = new LinkedHashMap<>();
+        d.put("name", p.name());
+        d.put("pricing", p.pricing());
+        d.put("priceMinor", p.priceMinor());
+        if (p.costMinor() != null) d.put("costMinor", p.costMinor());
+        return mapper.writeValueAsString(d);
+    }
+
+    /** Solo los campos que cambiaron, con su valor antes y después: es lo que muestra el historial. */
+    private String changesDetail(ProductView c, ProductInput p, boolean active) {
+        Map<String, Map<String, Object>> ch = new LinkedHashMap<>();
+        diff(ch, "name", c.name(), p.name());
+        diff(ch, "variant", c.variant(), p.variant());
+        diff(ch, "barcode", c.barcode(), p.barcode());
+        diff(ch, "shortCode", c.shortCode(), p.shortCode());
+        diff(ch, "categoryId", c.categoryId() == null ? null : c.categoryId().toString(), p.categoryId() == null ? null : p.categoryId().toString());
+        diff(ch, "unit", c.unit(), p.unit());
+        diff(ch, "pricing", c.pricing(), p.pricing());
+        diff(ch, "priceMinor", c.priceMinor(), p.priceMinor());
+        diff(ch, "costMinor", c.costMinor(), p.costMinor());
+        diff(ch, "isQuick", c.isQuick(), Boolean.TRUE.equals(p.isQuick()));
+        diff(ch, "quickPosition", c.quickPosition(), p.quickPosition());
+        diff(ch, "color", c.color(), p.color());
+        diff(ch, "trackStock", c.trackStock(), Boolean.TRUE.equals(p.trackStock()));
+        diff(ch, "minStockMilli", c.minStockMilli(), p.minStockMilli());
+        diff(ch, "active", c.active(), active);
+        return mapper.writeValueAsString(Map.of("name", p.name(), "changes", ch));
+    }
+
+    private static void diff(Map<String, Map<String, Object>> out, String field, Object from, Object to) {
+        if (java.util.Objects.equals(from, to)) return;
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("from", from);
+        m.put("to", to);
+        out.put(field, m);
+    }
+
+    /** Historial de un producto, del más nuevo al más viejo (últimos 200). Lo puede ver cualquiera que atiende la caja. */
+    public List<ProductHistoryEntry> history(MemberContext ctx, UUID productId) {
+        ctx.require(Permission.SELL);
+        get(ctx.businessId(), productId);
+        return jdbc.sql("""
+                        SELECT a.id, a.action, a.actor_member_id, a.detail, a.at, m.display_name, m.role
+                          FROM audit_log a LEFT JOIN member m ON m.id = a.actor_member_id
+                         WHERE a.business_id = :b AND a.entity = 'product' AND a.entity_id = :p ORDER BY a.id DESC LIMIT 200
+                        """)
+                .param("b", ctx.businessId()).param("p", productId.toString())
+                .query((rs, n) -> {
+                    Map<String, ProductFieldChange> changes = new LinkedHashMap<>();
+                    String name = null;
+                    String detail = rs.getString("detail");
+                    if (detail != null && detail.startsWith("{")) {
+                        try {
+                            tools.jackson.databind.JsonNode root = mapper.readTree(detail);
+                            if (root.hasNonNull("name")) name = root.get("name").asString();
+                            if (root.has("changes")) {
+                                root.get("changes").properties().forEach(e -> changes.put(e.getKey(), new ProductFieldChange(plain(e.getValue().get("from")), plain(e.getValue().get("to")))));
+                            } else {
+                                // Alta: lo que se guardó al crear.
+                                root.properties().forEach(e -> { if (!e.getKey().equals("name")) changes.put(e.getKey(), new ProductFieldChange(null, plain(e.getValue()))); });
+                            }
+                        } catch (RuntimeException ignored) {
+                            // detalle viejo (solo el nombre) o ilegible: se muestra la acción sin campos
+                        }
+                    } else {
+                        name = detail;
+                    }
+                    return new ProductHistoryEntry(rs.getLong("id"), rs.getString("action"), rs.getObject("actor_member_id", UUID.class), rs.getString("display_name"),
+                            rs.getString("role"), rs.getTimestamp("at").toInstant(), changes, name);
+                }).list();
+    }
+
+    private static Object plain(tools.jackson.databind.JsonNode n) {
+        if (n == null || n.isNull()) return null;
+        if (n.isBoolean()) return n.asBoolean();
+        if (n.isIntegralNumber()) return n.asLong();
+        if (n.isNumber()) return n.asDouble();
+        return n.asString();
+    }
+
     private static boolean same(ProductView c, ProductInput p, boolean active) {
         return java.util.Objects.equals(c.barcode(), p.barcode()) && java.util.Objects.equals(c.shortCode(), p.shortCode())
                 && c.name().equals(p.name()) && java.util.Objects.equals(c.variant(), p.variant())
@@ -222,14 +314,16 @@ public class ProductService {
         String unit = in.unit() == null ? "UNIT" : in.unit();
         if (!UNITS.contains(unit)) throw ApiException.badRequest("INVALID_UNIT", "Invalid unit");
         String pricing = in.pricing() == null ? "FIXED" : in.pricing();
-        if (!pricing.equals("FIXED") && !pricing.equals("BY_WEIGHT")) throw ApiException.badRequest("INVALID_PRICING", "Invalid pricing");
-        if (in.priceMinor() == null || in.priceMinor() < 0 || in.priceMinor() > MAX_MINOR) throw ApiException.badRequest("INVALID_PRICE", "Invalid price");
+        if (!pricing.equals("FIXED") && !pricing.equals("BY_WEIGHT") && !pricing.equals("OPEN")) throw ApiException.badRequest("INVALID_PRICING", "Invalid pricing");
+        // Con precio abierto ("OPEN") el precio es opcional: se pregunta al vender y, si se da, es solo una sugerencia.
+        long price = in.priceMinor() == null && pricing.equals("OPEN") ? 0L : in.priceMinor() == null ? -1L : in.priceMinor();
+        if (price < 0 || price > MAX_MINOR) throw ApiException.badRequest("INVALID_PRICE", "Invalid price");
         if (in.costMinor() != null && (in.costMinor() < 0 || in.costMinor() > MAX_MINOR)) throw ApiException.badRequest("INVALID_COST", "Invalid cost");
         String barcode = blankToNull(in.barcode());
         if (barcode != null && barcode.length() > 64) throw ApiException.badRequest("INVALID_BARCODE", "Code too long");
         String shortCode = blankToNull(in.shortCode());
         if (shortCode != null && shortCode.length() > 16) throw ApiException.badRequest("INVALID_SHORT_CODE", "Short code too long");
-        return new ProductInput(barcode, shortCode, name, blankToNull(in.variant()), in.categoryId(), unit, pricing, in.priceMinor(),
+        return new ProductInput(barcode, shortCode, name, blankToNull(in.variant()), in.categoryId(), unit, pricing, price,
                 in.costMinor(), in.isQuick(), in.quickPosition(), blankToNull(in.color()), in.trackStock(), in.minStockMilli(), in.active());
     }
 

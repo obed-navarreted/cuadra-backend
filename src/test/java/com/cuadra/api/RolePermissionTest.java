@@ -17,19 +17,19 @@ class RolePermissionTest {
     }
 
     @Test
-    void adminManagesCashiersButNotAdminsNorBusiness() {
+    void adminManagesEveryoneExceptTheOwnerAndNeverTheBusiness() {
         Set<Permission> allowed = EnumSet.of(Permission.VIEW_MEMBERS, Permission.MANAGE_CASHIERS, Permission.INVITE_CASHIER,
-                Permission.MANAGE_DEVICES, Permission.SELL, Permission.VIEW_REPORTS, Permission.MANAGE_CATALOG,
-                Permission.PROGRAM_NOTIFICATIONS, Permission.VIEW_SETTINGS, Permission.EDIT_SALES, Permission.MANAGE_CREDIT, Permission.MANAGE_EXPENSES, Permission.MANAGE_STOCK);
+                Permission.MANAGE_DEVICES, Permission.SELL, Permission.VIEW_REPORTS, Permission.MANAGE_CATALOG, Permission.MANAGE_ADMINS, Permission.INVITE_ADMIN,
+                Permission.PROGRAM_NOTIFICATIONS, Permission.VIEW_SETTINGS, Permission.EDIT_PRODUCTS, Permission.EDIT_SALES, Permission.MANAGE_CREDIT, Permission.MANAGE_EXPENSES, Permission.MANAGE_STOCK);
         for (Permission p : Permission.values()) assertThat(Role.ADMIN.can(p)).as("ADMIN %s", p).isEqualTo(allowed.contains(p));
-        assertThat(Role.ADMIN.can(Permission.MANAGE_ADMINS)).isFalse();
+        assertThat(Role.ADMIN.can(Permission.MANAGE_ADMINS)).isTrue();
         assertThat(Role.ADMIN.can(Permission.EDIT_BUSINESS)).isFalse();
         assertThat(Role.ADMIN.can(Permission.TRANSFER_OWNERSHIP)).isFalse();
     }
 
     @Test
-    void cashierOnlySellsAndViews() {
-        Set<Permission> allowed = EnumSet.of(Permission.VIEW_MEMBERS, Permission.SELL, Permission.VIEW_SETTINGS);
+    void cashierSellsViewsAndEditsProductsButNeverDeletesThem() {
+        Set<Permission> allowed = EnumSet.of(Permission.VIEW_MEMBERS, Permission.SELL, Permission.VIEW_SETTINGS, Permission.EDIT_PRODUCTS);
         for (Permission p : Permission.values()) assertThat(Role.CASHIER.can(p)).as("CASHIER %s", p).isEqualTo(allowed.contains(p));
     }
 }

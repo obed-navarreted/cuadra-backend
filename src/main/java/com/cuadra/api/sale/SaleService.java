@@ -246,6 +246,7 @@ public class SaleService {
         if ("COMPLETED".equals(row.status)) {
             if (!"COMPLETED".equals(n.status)) return new Result(view(ctx.businessId(), id), Outcome.STALE);
             ctx.require(Permission.EDIT_SALES);
+            long previousTotal = jdbc.sql("SELECT total_minor FROM sale WHERE id = :id").param("id", id).query(Long.class).single();
             jdbc.sql("""
                             UPDATE sale SET label = :label, cash_register_id = :reg, subtotal_minor = :sub, discount_minor = :disc, total_minor = :tot,
                                    edited_by_member_id = :m, edited_at = :now, content_hash = :hash, updated_at = :now, rev = nextval('change_rev_seq')
@@ -258,7 +259,7 @@ public class SaleService {
             stock.reconcileSale(ctx, id);
             Instant originalCompletedAt = jdbc.sql("SELECT completed_at FROM sale WHERE id = :id").param("id", id).query((rs, i) -> rs.getTimestamp(1).toInstant()).single();
             credits.syncSaleCredits(ctx, id, saleCredits(n), originalCompletedAt);
-            audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "sale.edit", "sale", id, "total=" + n.total);
+            audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "sale.edit", "sale", id, "total=" + previousTotal + "→" + n.total);
             return new Result(view(ctx.businessId(), id), Outcome.UPDATED);
         }
 
@@ -334,6 +335,10 @@ public class SaleService {
         if ("CANCELLED".equals(status)) return view(ctx.businessId(), id);
         // Descartar una cuenta apartada lo hace cualquiera que venda; eliminar una venta cobrada, quien puede editarlas.
         ctx.require("COMPLETED".equals(status) ? Permission.EDIT_SALES : Permission.SELL);
+        // Eliminar una venta cobrada exige un MOTIVO (queda con quién y cuándo, y la venta se conserva como anulada): sin motivo no hay trazabilidad.
+        if ("COMPLETED".equals(status) && (reason == null || reason.trim().length() < 5)) {
+            throw ApiException.badRequest("REASON_REQUIRED", "A reason of at least 5 characters is required to delete a paid sale");
+        }
         if ("COMPLETED".equals(status)) credits.cancelSaleCredits(ctx, id);
         jdbc.sql("""
                         UPDATE sale SET status = 'CANCELLED', cancelled_by_member_id = :m, cancelled_at = :now, cancel_reason = :r, locked_by_device_id = NULL,

@@ -93,7 +93,7 @@ class InventoryTest extends ApiTestBase {
         call(put(base(b) + "/sales/" + sale), bearer(owner), saleWith(cuajada, 5000, "COMPLETED")).andExpect(status().isOk());
         assertEquals(5000, stock(cuajada));
         // Eliminarla devuelve todo.
-        call(post(base(b) + "/sales/" + sale + "/cancel"), bearer(owner), "{}").andExpect(status().isOk());
+        call(post(base(b) + "/sales/" + sale + "/cancel"), bearer(owner), "{\"reason\":\"error de cobro\"}").andExpect(status().isOk());
         assertEquals(10000, stock(cuajada));
         assertEquals(stock(cuajada), movementsSum(cuajada));
         // El historial conserva cada paso: nada se borra.
@@ -311,7 +311,7 @@ class InventoryTest extends ApiTestBase {
                 case 3 -> {
                     if (sales.isEmpty()) break;
                     UUID s = sales.get(rnd.nextInt(sales.size()));
-                    call(post(base(b) + "/sales/" + s + "/cancel"), bearer(owner), "{}").andExpect(status().isOk());
+                    call(post(base(b) + "/sales/" + s + "/cancel"), bearer(owner), "{\"reason\":\"error de cobro\"}").andExpect(status().isOk());
                     var old = live.remove(s);
                     if (old != null) model.merge(old.getKey(), old.getValue(), Long::sum);
                 }

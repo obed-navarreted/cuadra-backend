@@ -234,10 +234,10 @@ class CreditTest extends ApiTestBase {
         call(get(base(b) + "/credits/" + credit), bearer(owner), null).andExpect(jsonPath("$.amountMinor", is(4000))).andExpect(jsonPath("$.balanceMinor", is(2000)));
 
         // Eliminar la venta con abonos vigentes exige anularlos primero.
-        call(post(base(b) + "/sales/" + sale + "/cancel"), bearer(owner), "{}").andExpect(status().isConflict()).andExpect(jsonPath("$.code", is("CREDIT_HAS_PAYMENTS")));
+        call(post(base(b) + "/sales/" + sale + "/cancel"), bearer(owner), "{\"reason\":\"error de cobro\"}").andExpect(status().isConflict()).andExpect(jsonPath("$.code", is("CREDIT_HAS_PAYMENTS")));
         String paymentId = jdbc.sql("SELECT id FROM credit_payment WHERE credit_id = :c").param("c", credit).query(UUID.class).single().toString();
         call(post(base(b) + "/credit-payments/" + paymentId + "/void"), bearer(owner), "{\"reason\":\"venta anulada\"}").andExpect(status().isOk());
-        call(post(base(b) + "/sales/" + sale + "/cancel"), bearer(owner), "{}").andExpect(status().isOk());
+        call(post(base(b) + "/sales/" + sale + "/cancel"), bearer(owner), "{\"reason\":\"error de cobro\"}").andExpect(status().isOk());
         call(get(base(b) + "/credits/" + credit), bearer(owner), null).andExpect(jsonPath("$.status", is("CANCELLED"))).andExpect(jsonPath("$.balanceMinor", is(0)));
         call(get(base(b) + "/credits/summary"), bearer(owner), null).andExpect(jsonPath("$.openCount", is(0)));
     }

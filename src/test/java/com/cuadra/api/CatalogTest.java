@@ -19,7 +19,7 @@ class CatalogTest extends ApiTestBase {
     }
 
     @Test
-    void cashierCanCreateFromTheRegisterButOnlyManagersCanEdit() throws Exception {
+    void cashierCreatesAndEditsProductsButOnlyManagersCanDeleteThem() throws Exception {
         String owner = login("cata");
         UUID b = createBusiness(owner, "Catálogo A");
         UUID cashier = createPinMember(owner, b, "Kevin", "CASHIER");
@@ -30,13 +30,32 @@ class CatalogTest extends ApiTestBase {
                 .andExpect(status().isCreated()).andExpect(jsonPath("$.name", is("Cuajada"))).andExpect(jsonPath("$.priceMinor", is(2500)))
                 .andExpect(jsonPath("$.isQuick", is(true))).andExpect(jsonPath("$.pricing", is("FIXED")));
 
+        // El cajero también modifica (queda en el historial); lo que no puede es dar de baja.
         asDevice(put("/api/b/" + b + "/products/" + id), device, cashier, product("Cuajada", 3000, ""))
-                .andExpect(status().isForbidden());
-        call(put("/api/b/" + b + "/products/" + id), bearer(owner), product("Cuajada", 3000, ""))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.priceMinor", is(3000)));
         asDevice(delete("/api/b/" + b + "/products/" + id), device, cashier, null).andExpect(status().isForbidden());
+        // Ni por la puerta de atrás: cambiar `active` en la edición es lo mismo que dar de baja.
+        asDevice(put("/api/b/" + b + "/products/" + id), device, cashier, product("Cuajada", 3000, "\"active\":false")).andExpect(status().isForbidden());
+        call(get("/api/b/" + b + "/products/" + id), bearer(owner), null).andExpect(jsonPath("$.active", is(true)));
         call(delete("/api/b/" + b + "/products/" + id), bearer(owner), null).andExpect(status().isNoContent());
         call(get("/api/b/" + b + "/products/" + id), bearer(owner), null).andExpect(jsonPath("$.active", is(false)));
+    }
+
+    @Test
+    void aProductMayHaveNoFixedPriceAndNoCost() throws Exception {
+        String owner = login("catopen");
+        UUID b = createBusiness(owner, "Catálogo precio abierto");
+        UUID open = UUID.randomUUID();
+        // Sin precio ni costo: se pregunta al vender.
+        call(put("/api/b/" + b + "/products/" + open), bearer(owner), "{\"name\":\"Reparación\",\"pricing\":\"OPEN\"}").andExpect(status().isCreated())
+                .andExpect(jsonPath("$.pricing", is("OPEN"))).andExpect(jsonPath("$.priceMinor", is(0))).andExpect(jsonPath("$.costMinor").doesNotExist());
+        // Con un precio sugerido opcional.
+        call(put("/api/b/" + b + "/products/" + open), bearer(owner), "{\"name\":\"Reparación\",\"pricing\":\"OPEN\",\"priceMinor\":15000}").andExpect(status().isOk())
+                .andExpect(jsonPath("$.priceMinor", is(15000)));
+        // Un producto de precio fijo sí lo exige.
+        call(put("/api/b/" + b + "/products/" + UUID.randomUUID()), bearer(owner), "{\"name\":\"Sin precio\"}").andExpect(status().isBadRequest()).andExpect(jsonPath("$.code", is("INVALID_PRICE")));
+        // Y un modo desconocido no pasa.
+        call(put("/api/b/" + b + "/products/" + UUID.randomUUID()), bearer(owner), "{\"name\":\"X\",\"pricing\":\"MAGIC\",\"priceMinor\":1}").andExpect(status().isBadRequest()).andExpect(jsonPath("$.code", is("INVALID_PRICING")));
     }
 
     @Test

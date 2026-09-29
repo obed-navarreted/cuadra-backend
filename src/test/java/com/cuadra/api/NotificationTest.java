@@ -102,9 +102,9 @@ class NotificationTest extends ApiTestBase {
         UUID s1 = UUID.randomUUID();
         UUID s2 = UUID.randomUUID();
         for (UUID s : List.of(s1, s2)) call(put(base(b) + "/sales/" + s), bearer(owner), SaleTest.sale("COMPLETED", SaleTest.item("x", 500, 1000), SaleTest.pay("CASH", 500, ""), "")).andExpect(status().isCreated());
-        call(post(base(b) + "/sales/" + s1 + "/cancel"), bearer(owner), "{}").andExpect(status().isOk());
+        call(post(base(b) + "/sales/" + s1 + "/cancel"), bearer(owner), "{\"reason\":\"error de cobro\"}").andExpect(status().isOk());
         org.hamcrest.MatcherAssert.assertThat(types(owner, b), not(hasItem("SALE_DELETED")));
-        call(post(base(b) + "/sales/" + s2 + "/cancel"), bearer(admin), "{}").andExpect(status().isOk());
+        call(post(base(b) + "/sales/" + s2 + "/cancel"), bearer(admin), "{\"reason\":\"error de cobro\"}").andExpect(status().isOk());
         call(get(base(b) + "/notifications"), bearer(owner), null).andExpect(jsonPath("$.items[?(@.type=='SALE_DELETED')].args.totalMinor", hasItem(500)));
         org.hamcrest.MatcherAssert.assertThat(types(admin, b), not(hasItem("SALE_DELETED")));
     }

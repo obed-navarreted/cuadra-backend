@@ -116,6 +116,14 @@ public class ReportController {
         return reports.expenses(c, range(c, from, to));
     }
 
+    /** Cierre automático por jornada: una fila por día del rango, sin abrir ni cerrar nada. */
+    @GetMapping("/daily-close")
+    public ReportService.DailyClose dailyClose(@AuthenticationPrincipal Actor actor, @PathVariable UUID businessId, @RequestHeader(value = Access.MEMBER_HEADER, required = false) UUID memberId,
+                                               @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from, @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {
+        MemberContext c = ctx(actor, businessId, memberId);
+        return reports.dailyClose(c, range(c, from, to));
+    }
+
     @GetMapping("/closings")
     public List<ReportService.MemberClosings> closings(@AuthenticationPrincipal Actor actor, @PathVariable UUID businessId, @RequestHeader(value = Access.MEMBER_HEADER, required = false) UUID memberId,
                                                        @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from, @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {

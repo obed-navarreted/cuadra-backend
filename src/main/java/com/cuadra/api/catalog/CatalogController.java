@@ -80,6 +80,13 @@ public class CatalogController {
         return ResponseEntity.status(r.outcome() == ProductService.Outcome.CREATED ? HttpStatus.CREATED : HttpStatus.OK).body(r.product());
     }
 
+    /** Quién cambió qué en un producto (precio, nombre, baja…), del más nuevo al más viejo. */
+    @GetMapping("/products/{productId}/history")
+    public List<ProductService.ProductHistoryEntry> history(@AuthenticationPrincipal Actor actor, @PathVariable UUID businessId, @PathVariable UUID productId,
+                                                            @RequestHeader(value = Access.MEMBER_HEADER, required = false) UUID memberId) {
+        return products.history(access.member(actor, businessId, memberId), productId);
+    }
+
     @DeleteMapping("/products/{productId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void deactivate(@AuthenticationPrincipal Actor actor, @PathVariable UUID businessId, @PathVariable UUID productId,

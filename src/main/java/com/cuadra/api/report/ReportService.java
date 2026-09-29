@@ -83,6 +83,16 @@ public class ReportService {
     /** Ventas del periodo con su desglose por método de pago. */
     public record SalesReport(Range range, Sales sales, List<MethodAmount> byMethod) {}
 
+    /**
+     * Cierre automático de UNA jornada del negocio (de la hora de corte de un día a la del siguiente): nadie abre ni cierra nada. Lo vendido a la 1 a. m.
+     * cuenta para el día anterior. `expectedCashMinor` = ventas en efectivo + abonos en efectivo + entradas − gastos del cajón − retiros.
+     */
+    public record DayClose(LocalDate date, java.time.Instant startsAt, java.time.Instant endsAt, long salesCount, long salesMinor, List<MethodAmount> byMethod,
+                           List<MethodAmount> creditCollected, long drawerExpensesMinor, long otherExpensesMinor, long withdrawalsMinor, long depositsMinor,
+                           long expectedCashMinor, long cancelledCount, long cancelledMinor) {}
+
+    public record DailyClose(Range range, List<DayClose> days) {}
+
     public record Overview(Range range, Sales sales, List<MethodAmount> byMethod, Profit profit, long receivableMinor, List<DayPoint> series, List<Product> topProducts, long lowStockCount, MemberClosings lastClosing) {}
 
     // ---------- rango ----------
@@ -113,10 +123,53 @@ public class ReportService {
 
     /** Día comercial de una columna de fecha: la hora local menos la hora de corte. */
     private static String businessDate(String column) {
-        return "((" + column + " AT TIME ZONE :tz) - CAST(:cutoff AS interval))::date";
+        // Con la regla vigente en cada instante (el historial de zona/corte vive en `business_day_rule`): cambiar el corte no reagrupa días pasados.
+        return "business_date(:b, " + column + ")";
     }
 
     // ---------- ventas ----------
+
+    public DailyClose dailyClose(MemberContext ctx, Range r) {
+        ctx.require(Permission.VIEW_REPORTS);
+        UUID b = ctx.businessId();
+        BusinessDayService.Info info = days.info(b);
+        java.util.Map<LocalDate, long[]> sales = new java.util.HashMap<>();
+        q("SELECT " + businessDate("s.completed_at") + ", count(*), coalesce(sum(s.total_minor), 0) FROM sale s WHERE " + SALE_IN_RANGE + " GROUP BY 1", b, r)
+                .query((rs, n) -> { sales.put(rs.getObject(1, LocalDate.class), new long[] {rs.getLong(2), rs.getLong(3)}); return null; }).list();
+        java.util.Map<LocalDate, long[]> cancelled = new java.util.HashMap<>();
+        q("SELECT " + businessDate("s.cancelled_at") + ", count(*), coalesce(sum(s.total_minor), 0) FROM sale s WHERE s.business_id = :b AND s.status = 'CANCELLED' AND s.cancelled_at >= :s AND s.cancelled_at < :e GROUP BY 1", b, r)
+                .query((rs, n) -> { cancelled.put(rs.getObject(1, LocalDate.class), new long[] {rs.getLong(2), rs.getLong(3)}); return null; }).list();
+        java.util.Map<LocalDate, java.util.Map<String, Long>> paid = new java.util.HashMap<>();
+        q("SELECT " + businessDate("s.completed_at") + ", p.method, sum(p.amount_minor) FROM sale s JOIN sale_payment p ON p.sale_id = s.id WHERE " + SALE_IN_RANGE + " GROUP BY 1, 2", b, r)
+                .query((rs, n) -> { paid.computeIfAbsent(rs.getObject(1, LocalDate.class), k -> new java.util.TreeMap<>()).put(rs.getString(2), rs.getLong(3)); return null; }).list();
+        java.util.Map<LocalDate, java.util.Map<String, Long>> collected = new java.util.HashMap<>();
+        q("SELECT " + businessDate("c.occurred_at") + ", c.method, sum(c.amount_minor) FROM credit_payment c WHERE c.business_id = :b AND c.voided_at IS NULL AND c.occurred_at >= :s AND c.occurred_at < :e GROUP BY 1, 2", b, r)
+                .query((rs, n) -> { collected.computeIfAbsent(rs.getObject(1, LocalDate.class), k -> new java.util.TreeMap<>()).put(rs.getString(2), rs.getLong(3)); return null; }).list();
+        java.util.Map<LocalDate, long[]> expenses = new java.util.HashMap<>();   // [cajón, otros]
+        q("SELECT " + businessDate("e.occurred_at") + ", e.source = 'CASH_DRAWER', sum(e.amount_minor) FROM expense e WHERE e.business_id = :b AND e.voided_at IS NULL AND e.occurred_at >= :s AND e.occurred_at < :e GROUP BY 1, 2", b, r)
+                .query((rs, n) -> { expenses.computeIfAbsent(rs.getObject(1, LocalDate.class), k -> new long[2])[rs.getBoolean(2) ? 0 : 1] = rs.getLong(3); return null; }).list();
+        java.util.Map<LocalDate, long[]> moves = new java.util.HashMap<>();      // [retiros, entradas]
+        q("SELECT " + businessDate("m.occurred_at") + ", m.kind, sum(m.amount_minor) FROM cash_movement m WHERE m.business_id = :b AND m.voided_at IS NULL AND m.occurred_at >= :s AND m.occurred_at < :e GROUP BY 1, 2", b, r)
+                .query((rs, n) -> { moves.computeIfAbsent(rs.getObject(1, LocalDate.class), k -> new long[2])["WITHDRAWAL".equals(rs.getString(2)) ? 0 : 1] = rs.getLong(3); return null; }).list();
+
+        List<DayClose> out = new java.util.ArrayList<>();
+        long[] none = new long[2];
+        for (LocalDate d = r.from(); !d.isAfter(r.to()); d = d.plusDays(1)) {
+            long[] sv = sales.getOrDefault(d, none);
+            long[] cv = cancelled.getOrDefault(d, none);
+            java.util.Map<String, Long> pm = paid.getOrDefault(d, java.util.Map.of());
+            java.util.Map<String, Long> cm = collected.getOrDefault(d, java.util.Map.of());
+            long[] ev = expenses.getOrDefault(d, none);
+            long[] mv = moves.getOrDefault(d, none);
+            long expected = pm.getOrDefault("CASH", 0L) + cm.getOrDefault("CASH", 0L) + mv[1] - ev[0] - mv[0];
+            out.add(new DayClose(d, info.startOf(d), info.endOf(d), sv[0], sv[1], amounts(pm), amounts(cm), ev[0], ev[1], mv[0], mv[1], expected, cv[0], cv[1]));
+        }
+        return new DailyClose(r, out);
+    }
+
+    private static List<MethodAmount> amounts(java.util.Map<String, Long> m) {
+        return m.entrySet().stream().map(e -> new MethodAmount(e.getKey(), e.getValue())).toList();
+    }
 
     public Sales sales(MemberContext ctx, Range r) {
         ctx.require(Permission.VIEW_REPORTS);

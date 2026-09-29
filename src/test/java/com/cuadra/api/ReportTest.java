@@ -75,7 +75,7 @@ class ReportTest extends ApiTestBase {
         sale(owner, b, item(p, "Crema", 5000, 3000L, 3000), SaleTest.pay("CARD", 14000, ""), d21, 1000);
         // Una venta eliminada no cuenta.
         UUID gone = sale(owner, b, item(a, "Queso", 10000, 6000L, 1000), SaleTest.pay("CASH", 10000, ""), d21, 0);
-        call(post(base(b) + "/sales/" + gone + "/cancel"), bearer(owner), "{}").andExpect(status().isOk());
+        call(post(base(b) + "/sales/" + gone + "/cancel"), bearer(owner), "{\"reason\":\"error de cobro\"}").andExpect(status().isOk());
         expense(owner, b, 2000, "CASH_DRAWER", category(owner, b, "utilities"), d20);
         expense(owner, b, 8000, "BANK", category(owner, b, "rent"), d21);
         expense(owner, b, 4000, "CASH_DRAWER", category(owner, b, "goods"), d21);
@@ -230,4 +230,30 @@ class ReportTest extends ApiTestBase {
     }
 
     private static org.hamcrest.Matcher<Object> notNullString() { return org.hamcrest.Matchers.notNullValue(); }
+
+    /** El cierre es automático por jornada: lo de la 1 a. m. cuenta para el día anterior y "ayer" llega hasta las 2 a. m. de hoy. */
+    @Test
+    void theDailyCloseIsAutomaticAndTheNightBelongsToThePreviousDay() throws Exception {
+        String owner = login("dclose");
+        UUID b = createBusiness(owner, "Cierre del día");
+        // Managua = UTC-6, corte 02:00. 20 sep 18:00Z = 12:00 del 20; 21 sep 07:00Z = 01:00 del 21 (aún jornada del 20); 21 sep 08:00Z = 02:00 del 21.
+        sale(owner, b, item(null, "Tarde", 10000, null, 1000), SaleTest.pay("CASH", 10000, ""), "2026-09-20T18:00:00Z", 0);
+        sale(owner, b, item(null, "Madrugada", 3000, null, 1000), SaleTest.pay("CARD", 3000, ""), "2026-09-21T07:00:00Z", 0);
+        sale(owner, b, item(null, "Nuevo día", 5000, null, 1000), SaleTest.pay("CASH", 5000, ""), "2026-09-21T08:00:00Z", 0);
+        UUID cat = category(owner, b, "other");
+        expense(owner, b, 2000, "CASH_DRAWER", cat, "2026-09-21T06:30:00Z");   // 00:30 del 21: también jornada del 20
+        String url = base(b) + "/reports/daily-close?from=2026-09-20&to=2026-09-21";
+        call(get(url), bearer(owner), null).andExpect(status().isOk()).andExpect(jsonPath("$.days", hasSize(2)))
+                // Jornada del 20: de 02:00 del 20 a 02:00 del 21 (08:00Z a 08:00Z).
+                .andExpect(jsonPath("$.days[0].date", is("2026-09-20"))).andExpect(jsonPath("$.days[0].startsAt", is("2026-09-20T08:00:00Z"))).andExpect(jsonPath("$.days[0].endsAt", is("2026-09-21T08:00:00Z")))
+                .andExpect(jsonPath("$.days[0].salesCount", is(2))).andExpect(jsonPath("$.days[0].salesMinor", is(13000)))
+                .andExpect(jsonPath("$.days[0].byMethod[?(@.method=='CASH')].amountMinor", contains(10000))).andExpect(jsonPath("$.days[0].byMethod[?(@.method=='CARD')].amountMinor", contains(3000)))
+                .andExpect(jsonPath("$.days[0].drawerExpensesMinor", is(2000))).andExpect(jsonPath("$.days[0].expectedCashMinor", is(8000)))
+                // Jornada del 21: empieza a las 02:00.
+                .andExpect(jsonPath("$.days[1].date", is("2026-09-21"))).andExpect(jsonPath("$.days[1].salesCount", is(1))).andExpect(jsonPath("$.days[1].salesMinor", is(5000)))
+                .andExpect(jsonPath("$.days[1].expectedCashMinor", is(5000)));
+        // Un cajero no ve el cierre del negocio.
+        UUID cashier = createPinMember(owner, b, "Kevin", "CASHIER");
+        asDevice(get(url), linkDevice(owner, b), cashier, null).andExpect(status().isForbidden());
+    }
 }

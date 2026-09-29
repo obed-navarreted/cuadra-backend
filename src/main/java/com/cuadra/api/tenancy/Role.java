@@ -5,17 +5,21 @@ import java.util.Set;
 
 /** Roles del negocio y la matriz de permisos (sección 3.2 del plan). Un solo lugar, probado por celda. */
 public enum Role {
+    /** Todo, y lo único que solo él puede: editar el negocio, el plan, eliminarlo y traspasarlo. Nadie más puede modificarlo a él. */
     OWNER(EnumSet.allOf(Permission.class)),
+    /** Gestiona a TODAS las personas menos al dueño (cajeros y otros admins: crear, invitar, cambiar datos y PIN, dar de baja). */
     ADMIN(EnumSet.of(
             Permission.VIEW_MEMBERS, Permission.MANAGE_CASHIERS, Permission.INVITE_CASHIER,
-            Permission.MANAGE_DEVICES, Permission.SELL, Permission.VIEW_REPORTS, Permission.MANAGE_CATALOG,
-            Permission.PROGRAM_NOTIFICATIONS, Permission.VIEW_SETTINGS, Permission.EDIT_SALES, Permission.MANAGE_CREDIT, Permission.MANAGE_EXPENSES, Permission.MANAGE_STOCK)),
-    CASHIER(EnumSet.of(Permission.VIEW_MEMBERS, Permission.SELL, Permission.VIEW_SETTINGS));
+            Permission.MANAGE_DEVICES, Permission.SELL, Permission.VIEW_REPORTS, Permission.MANAGE_CATALOG, Permission.MANAGE_ADMINS, Permission.INVITE_ADMIN,
+            Permission.PROGRAM_NOTIFICATIONS, Permission.VIEW_SETTINGS, Permission.EDIT_PRODUCTS, Permission.EDIT_SALES, Permission.MANAGE_CREDIT, Permission.MANAGE_EXPENSES, Permission.MANAGE_STOCK)),
+    CASHIER(EnumSet.of(Permission.VIEW_MEMBERS, Permission.SELL, Permission.VIEW_SETTINGS, Permission.EDIT_PRODUCTS));
 
     public enum Permission {
         VIEW_MEMBERS,
         VIEW_SETTINGS,
         SELL,
+        /** Agregar y modificar productos y precios (cualquier rol que atiende la caja). Dar de baja un producto exige MANAGE_CATALOG. Todo cambio queda en el historial del producto. */
+        EDIT_PRODUCTS,
         EDIT_SALES,
         /** Condonar deudas, anular abonos, editar límites de crédito y plantillas de mensajes. */
         MANAGE_CREDIT,

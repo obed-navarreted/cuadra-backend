@@ -253,4 +253,16 @@ class PlatformTest extends ApiTestBase {
         call(post("/api/platform/announcements/" + JsonPath.read(res, "$.id") + "/end-banner"), bearer(root), null).andExpect(status().isOk());
         mvc.perform(get("/api/config")).andExpect(jsonPath("$.announcement", is(nullValue())));
     }
+
+    /** Un teléfono vinculado (con la persona elegida por PIN) también puede escribir a soporte, y el límite por hora se aplica a esa persona. */
+    @Test
+    void aLinkedPhoneCanSendSupportTicketsAndTheHourlyLimitApplies() throws Exception {
+        String owner = login("plt-h");
+        UUID biz = createBusiness(owner, "Soporte desde el teléfono");
+        UUID cashier = createPinMember(owner, biz, "Kevin", "CASHIER");
+        String device = linkDevice(owner, biz);
+        String body = "{\"category\":\"QUESTION\",\"message\":\"No me deja imprimir el recibo\",\"diagnostics\":\"app 0.1.0\"}";
+        for (int i = 0; i < 5; i++) asDevice(post("/api/support/tickets"), device, cashier, body).andExpect(status().isCreated()).andExpect(jsonPath("$.reference").exists());
+        assertCode(asDevice(post("/api/support/tickets"), device, cashier, body).andExpect(status().isTooManyRequests()), "TOO_MANY_TICKETS");
+    }
 }

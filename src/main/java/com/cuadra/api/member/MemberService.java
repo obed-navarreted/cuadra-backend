@@ -108,7 +108,11 @@ public class MemberService {
     public void resetPin(MemberContext ctx, UUID memberId, String pin, boolean mustChange) {
         MemberView target = get(ctx.businessId(), memberId);
         Role targetRole = Role.valueOf(target.role());
-        if (!ctx.memberId().equals(memberId)) requireManage(ctx, targetRole);
+        if (!ctx.memberId().equals(memberId)) {
+            // Al dueño solo lo cambia él mismo (con su sesión de Google): ni siquiera un admin puede restablecerle el PIN.
+            if (targetRole == Role.OWNER) throw ApiException.forbidden("CANNOT_MODIFY_OWNER", "The owner cannot be modified");
+            requireManage(ctx, targetRole);
+        }
         validatePin(pin);
         jdbc.sql("""
                         UPDATE member SET pin_hash = :h, pin_set_at = now(), pin_must_change = :m, rev = nextval('change_rev_seq')

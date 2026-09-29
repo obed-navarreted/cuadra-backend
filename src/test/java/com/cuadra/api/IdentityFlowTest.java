@@ -157,7 +157,7 @@ class IdentityFlowTest extends ApiTestBase {
     }
 
     @Test
-    void invitationLetsAGoogleUserJoinAsAdminButAdminCannotInviteAdmins() throws Exception {
+    void invitationLetsAGoogleUserJoinAsAdminAndAdminsManageEveryoneButNotTheBusiness() throws Exception {
         String owner = login("oscar");
         String guest = login("gina");
         UUID b = createBusiness(owner, "Tienda Oscar");
@@ -180,13 +180,13 @@ class IdentityFlowTest extends ApiTestBase {
 
         call(get("/api/me"), bearer(guest), null).andExpect(jsonPath("$.businesses[0].role", is("ADMIN")));
 
-        // El admin gestiona cajeros e invita cajeros, pero no admins.
+        // El admin gestiona a todos menos al dueño: invita y crea cajeros y también otros admins.
         call(post("/api/b/" + b + "/invitations"), bearer(guest), "{\"role\":\"CASHIER\"}").andExpect(status().isCreated());
-        call(post("/api/b/" + b + "/invitations"), bearer(guest), "{\"role\":\"ADMIN\"}").andExpect(status().isForbidden());
+        call(post("/api/b/" + b + "/invitations"), bearer(guest), "{\"role\":\"ADMIN\"}").andExpect(status().isCreated());
         call(post("/api/b/" + b + "/members"), bearer(guest), "{\"displayName\":\"Caj\",\"role\":\"CASHIER\",\"pin\":\"4321\"}")
                 .andExpect(status().isCreated());
         call(post("/api/b/" + b + "/members"), bearer(guest), "{\"displayName\":\"Adm\",\"role\":\"ADMIN\",\"pin\":\"4321\"}")
-                .andExpect(status().isForbidden());
+                .andExpect(status().isCreated());
         // ...ni edita ajustes del negocio.
         call(put("/api/b/" + b), bearer(guest), "{\"name\":\"Mío ahora\"}").andExpect(status().isForbidden());
     }

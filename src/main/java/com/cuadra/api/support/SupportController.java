@@ -76,8 +76,8 @@ public class SupportController {
         Timestamp since = Timestamp.from(clock.instant().minus(Duration.ofHours(1)));
         int recent = jdbc.sql("""
                         SELECT count(*) FROM support_ticket WHERE created_at > :since AND
-                               ((:u IS NOT NULL AND user_account_id = :u) OR (:m IS NOT NULL AND member_id = :m)
-                                OR (:u IS NULL AND :m IS NULL AND business_id = :b))
+                               ((CAST(:u AS uuid) IS NOT NULL AND user_account_id = CAST(:u AS uuid)) OR (CAST(:m AS uuid) IS NOT NULL AND member_id = CAST(:m AS uuid))
+                                OR (CAST(:u AS uuid) IS NULL AND CAST(:m AS uuid) IS NULL AND business_id = CAST(:b AS uuid)))
                         """)
                 .param("since", since).param("u", userId, java.sql.Types.OTHER).param("m", memberId, java.sql.Types.OTHER)
                 .param("b", businessId, java.sql.Types.OTHER).query(Integer.class).single();
@@ -98,7 +98,7 @@ public class SupportController {
         String reference = "#" + id.toString().substring(0, 8);
         String businessName = businessId == null ? "-" : jdbc.sql("SELECT name FROM business WHERE id = :b").param("b", businessId)
                 .query(String.class).optional().orElse("-");
-        String subject = "[Cuadra " + reference + "] " + category + " — " + businessName;
+        String subject = "[Cuentiva " + reference + "] " + category + " — " + businessName;
         String text = body.message().trim() + "\n\n--\nResponder a: " + (replyEmail == null ? "-" : replyEmail)
                 + (body.replyToPhone() == null ? "" : " / " + body.replyToPhone())
                 + "\nNegocio: " + businessName + " (" + businessId + ")\nMiembro: " + memberId

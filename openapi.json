@@ -335,6 +335,16 @@
           "dayCutoff" : {
             "type" : [ "string", "null" ]
           },
+          "dayRuleEffectiveFrom" : {
+            "format" : "date",
+            "type" : [ "string", "null" ]
+          },
+          "dayRules" : {
+            "items" : {
+              "$ref" : "#/components/schemas/DayRuleView"
+            },
+            "type" : [ "array", "null" ]
+          },
           "defaultLocale" : {
             "type" : [ "string", "null" ]
           },
@@ -880,6 +890,86 @@
         "required" : [ "archived", "balanceMinor", "id", "rev" ],
         "type" : "object"
       },
+      "DailyClose" : {
+        "properties" : {
+          "days" : {
+            "items" : {
+              "$ref" : "#/components/schemas/DayClose"
+            },
+            "type" : [ "array", "null" ]
+          },
+          "range" : {
+            "$ref" : "#/components/schemas/Range"
+          }
+        },
+        "type" : "object"
+      },
+      "DayClose" : {
+        "properties" : {
+          "byMethod" : {
+            "items" : {
+              "$ref" : "#/components/schemas/MethodAmount"
+            },
+            "type" : [ "array", "null" ]
+          },
+          "cancelledCount" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "cancelledMinor" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "creditCollected" : {
+            "items" : {
+              "$ref" : "#/components/schemas/MethodAmount"
+            },
+            "type" : [ "array", "null" ]
+          },
+          "date" : {
+            "format" : "date",
+            "type" : [ "string", "null" ]
+          },
+          "depositsMinor" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "drawerExpensesMinor" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "endsAt" : {
+            "format" : "date-time",
+            "type" : [ "string", "null" ]
+          },
+          "expectedCashMinor" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "otherExpensesMinor" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "salesCount" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "salesMinor" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "startsAt" : {
+            "format" : "date-time",
+            "type" : [ "string", "null" ]
+          },
+          "withdrawalsMinor" : {
+            "format" : "int64",
+            "type" : "integer"
+          }
+        },
+        "required" : [ "cancelledCount", "cancelledMinor", "depositsMinor", "drawerExpensesMinor", "expectedCashMinor", "otherExpensesMinor", "salesCount", "salesMinor", "withdrawalsMinor" ],
+        "type" : "object"
+      },
       "DayPoint" : {
         "properties" : {
           "date" : {
@@ -896,6 +986,21 @@
           }
         },
         "required" : [ "expensesMinor", "salesMinor" ],
+        "type" : "object"
+      },
+      "DayRuleView" : {
+        "properties" : {
+          "dayCutoff" : {
+            "type" : [ "string", "null" ]
+          },
+          "from" : {
+            "format" : "date",
+            "type" : [ "string", "null" ]
+          },
+          "timezone" : {
+            "type" : [ "string", "null" ]
+          }
+        },
         "type" : "object"
       },
       "Debtor" : {
@@ -3332,6 +3437,49 @@
           }
         },
         "required" : [ "costMinor", "fullyCosted", "profitMinor", "quantityMilli", "revenueMinor" ],
+        "type" : "object"
+      },
+      "ProductFieldChange" : {
+        "properties" : {
+          "from" : { },
+          "to" : { }
+        },
+        "type" : "object"
+      },
+      "ProductHistoryEntry" : {
+        "properties" : {
+          "action" : {
+            "type" : [ "string", "null" ]
+          },
+          "actorMemberId" : {
+            "format" : "uuid",
+            "type" : [ "string", "null" ]
+          },
+          "actorName" : {
+            "type" : [ "string", "null" ]
+          },
+          "actorRole" : {
+            "type" : [ "string", "null" ]
+          },
+          "at" : {
+            "format" : "date-time",
+            "type" : [ "string", "null" ]
+          },
+          "changes" : {
+            "additionalProperties" : {
+              "$ref" : "#/components/schemas/ProductFieldChange"
+            },
+            "type" : [ "object", "null" ]
+          },
+          "id" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "name" : {
+            "type" : [ "string", "null" ]
+          }
+        },
+        "required" : [ "id" ],
         "type" : "object"
       },
       "ProductInput" : {
@@ -7752,6 +7900,52 @@
         "tags" : [ "catalog-controller" ]
       }
     },
+    "/api/b/{businessId}/products/{productId}/history" : {
+      "get" : {
+        "operationId" : "history",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "businessId",
+          "required" : true,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        }, {
+          "in" : "path",
+          "name" : "productId",
+          "required" : true,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        }, {
+          "in" : "header",
+          "name" : "X-Member-Id",
+          "required" : false,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "items" : {
+                    "$ref" : "#/components/schemas/ProductHistoryEntry"
+                  },
+                  "type" : "array"
+                }
+              }
+            },
+            "description" : "OK"
+          }
+        },
+        "tags" : [ "catalog-controller" ]
+      }
+    },
     "/api/b/{businessId}/products/{productId}/stock-movements" : {
       "get" : {
         "operationId" : "productMovements",
@@ -8182,6 +8376,57 @@
               "text/csv" : {
                 "schema" : {
                   "type" : "string"
+                }
+              }
+            },
+            "description" : "OK"
+          }
+        },
+        "tags" : [ "report-controller" ]
+      }
+    },
+    "/api/b/{businessId}/reports/daily-close" : {
+      "get" : {
+        "operationId" : "dailyClose",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "businessId",
+          "required" : true,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        }, {
+          "in" : "header",
+          "name" : "X-Member-Id",
+          "required" : false,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        }, {
+          "in" : "query",
+          "name" : "from",
+          "required" : false,
+          "schema" : {
+            "format" : "date",
+            "type" : "string"
+          }
+        }, {
+          "in" : "query",
+          "name" : "to",
+          "required" : false,
+          "schema" : {
+            "format" : "date",
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/DailyClose"
                 }
               }
             },

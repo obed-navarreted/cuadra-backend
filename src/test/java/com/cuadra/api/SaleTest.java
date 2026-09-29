@@ -114,7 +114,7 @@ class SaleTest extends ApiTestBase {
                 .andExpect(jsonPath("$.status", is("CANCELLED"))).andExpect(jsonPath("$.cancelReason", is("cliente devolvió")))
                 .andExpect(jsonPath("$.cancelledBy.name", is("sale")));
         // Cancelar dos veces es idempotente, y una cancelada no revive.
-        call(post(url(b, id) + "/cancel"), bearer(owner), null).andExpect(status().isOk());
+        call(post(url(b, id) + "/cancel"), bearer(owner), "{\"reason\":\"error de cobro\"}").andExpect(status().isOk());
         call(put(url(b, id)), bearer(owner), edited).andExpect(status().isOk()).andExpect(jsonPath("$.status", is("CANCELLED")));
 
         UUID parked = UUID.randomUUID();
@@ -134,7 +134,7 @@ class SaleTest extends ApiTestBase {
         call(put(url(b, s1)), bearer(owner), sale("COMPLETED", item("a", 10000, 1000), pay("CASH", 10000, ""), "")).andExpect(status().isCreated());
         asDevice(put(url(b, s2)), device, cashier, sale("COMPLETED", item("b", 5000, 1000), pay("TRANSFER", 2000, "") + "," + pay("CREDIT", 3000, "\"debtorLabel\":\"Ana\""), "")).andExpect(status().isCreated());
         call(put(url(b, s3)), bearer(owner), sale("COMPLETED", item("c", 700, 1000), pay("CARD", 700, ""), "")).andExpect(status().isCreated());
-        call(post(url(b, s3) + "/cancel"), bearer(owner), null).andExpect(status().isOk());
+        call(post(url(b, s3) + "/cancel"), bearer(owner), "{\"reason\":\"error de cobro\"}").andExpect(status().isOk());
 
         call(get("/api/b/" + b + "/sales/summary"), bearer(owner), null).andExpect(status().isOk())
                 .andExpect(jsonPath("$.salesCount", is(2))).andExpect(jsonPath("$.totalMinor", is(15000)))
@@ -243,5 +243,28 @@ class SaleTest extends ApiTestBase {
 
         asDevice(put(url(b, id)), phoneB, kevin, sale("COMPLETED", it, pay("CASH", 1000, ""), "")).andExpect(status().isOk())
                 .andExpect(jsonPath("$.status", is("COMPLETED")));
+    }
+
+    /** Eliminar una venta cobrada queda con quién, cuándo y por qué; la venta se conserva como anulada y sale de los totales. */
+    @Test
+    void deletingAPaidSaleNeedsAReasonAndLeavesATrace() throws Exception {
+        String owner = login("saldel");
+        UUID b = createBusiness(owner, "Venta anulada");
+        UUID cashier = createPinMember(owner, b, "Kevin", "CASHIER");
+        String device = linkDevice(owner, b);
+        UUID id = UUID.randomUUID();
+        asDevice(put(url(b, id)), device, cashier, sale("COMPLETED", item("x", 1000, 1000), pay("CASH", 1000, ""), "")).andExpect(status().isCreated());
+        // El cajero no elimina una venta cobrada; sin motivo, nadie.
+        asDevice(post(url(b, id) + "/cancel"), device, cashier, "{\"reason\":\"me equivoqué\"}").andExpect(status().isForbidden());
+        assertCode(call(post(url(b, id) + "/cancel"), bearer(owner), "{}").andExpect(status().isBadRequest()), "REASON_REQUIRED");
+        assertCode(call(post(url(b, id) + "/cancel"), bearer(owner), "{\"reason\":\"no\"}").andExpect(status().isBadRequest()), "REASON_REQUIRED");
+        call(get(url(b, id)), bearer(owner), null).andExpect(jsonPath("$.status", is("COMPLETED")));
+        call(post(url(b, id) + "/cancel"), bearer(owner), "{\"reason\":\"cliente devolvió todo\"}").andExpect(status().isOk())
+                .andExpect(jsonPath("$.status", is("CANCELLED"))).andExpect(jsonPath("$.cancelReason", is("cliente devolvió todo")));
+        // La venta sigue ahí (con su contenido), marcada como anulada, con quién y cuándo.
+        call(get(url(b, id)), bearer(owner), null).andExpect(jsonPath("$.status", is("CANCELLED"))).andExpect(jsonPath("$.items", org.hamcrest.Matchers.hasSize(1)))
+                .andExpect(jsonPath("$.cancelledAt").isNotEmpty()).andExpect(jsonPath("$.cancelledBy.name").isNotEmpty());
+        // Y queda en la actividad del dueño.
+        call(get("/api/b/" + b + "/activity"), bearer(owner), null).andExpect(jsonPath("$.items[?(@.action=='sale.cancel')].detail").isNotEmpty());
     }
 }
