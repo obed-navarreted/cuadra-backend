@@ -44,15 +44,15 @@ public class AuthController {
         return new LoginResponse(r.token(), "Bearer", r.expiresAt(), r.userId());
     }
 
-    public record MemberLoginRequest(@NotBlank @jakarta.validation.constraints.Size(max = 20) String businessCode, @NotBlank @jakarta.validation.constraints.Size(max = 120) String username,
+    public record MemberLoginRequest(@NotBlank @jakarta.validation.constraints.Size(max = 20) String businessCode, @jakarta.validation.constraints.Size(max = 120) String username,
                                      @NotBlank @jakarta.validation.constraints.Size(max = 12) String pin, @jakarta.validation.constraints.Size(max = 80) String deviceName,
                                      @jakarta.validation.constraints.Size(max = 80) String model, @jakarta.validation.constraints.Size(max = 40) String osVersion,
                                      @jakarta.validation.constraints.Size(max = 20) String appVersion) {}
 
-    /** Entrar con código del negocio + usuario + PIN (admins y cajeros creados a mano): vincula este teléfono al negocio. */
+    /** Entrar con código del negocio + PIN (admins y cajeros creados a mano): vincula este teléfono al negocio. `username` ya no se usa (se acepta por compatibilidad con apps viejas). */
     @PostMapping("/member-login")
     public com.cuadra.api.device.DeviceService.MemberLoginResult memberLogin(@Valid @RequestBody MemberLoginRequest body, @RequestHeader(value = "User-Agent", required = false) String userAgent) {
-        return devices.memberLogin(new com.cuadra.api.device.DeviceService.MemberLoginRequest(body.businessCode(), body.username(), body.pin(), body.deviceName(), body.model(), body.osVersion(), body.appVersion()), userAgent);
+        return devices.memberLogin(new com.cuadra.api.device.DeviceService.MemberLoginRequest(body.businessCode(), body.pin(), body.deviceName(), body.model(), body.osVersion(), body.appVersion()), userAgent);
     }
 
     @PostMapping("/logout")

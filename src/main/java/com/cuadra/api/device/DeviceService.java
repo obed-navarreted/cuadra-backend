@@ -158,54 +158,55 @@ public class DeviceService {
         return new SelfLinked(deviceId, token, register);
     }
 
-    public record MemberLoginRequest(String businessCode, String username, String pin, String deviceName, String model, String osVersion, String appVersion) {}
+    public record MemberLoginRequest(String businessCode, String pin, String deviceName, String model, String osVersion, String appVersion) {}
 
     public record MemberLoginResult(UUID deviceId, String deviceToken, UUID businessId, UUID memberId, String memberName, String role, boolean pinMustChange) {}
 
-    private static final int MAX_PIN_FAILURES = 5;
-    private static final Duration PIN_LOCKOUT = Duration.ofMinutes(15);
+    /** Fallos de código+PIN que aguanta un negocio dentro de la ventana antes de pausar la entrada con código. */
+    static final int MAX_BUSINESS_FAILURES = 10;
+    private static final Duration FAILURE_WINDOW = Duration.ofMinutes(15);
+    private static final Duration BUSINESS_LOCKOUT = Duration.ofMinutes(15);
 
     /**
-     * Entrar con CÓDIGO DEL NEGOCIO + USUARIO (el nombre de la persona) + PIN, sin cuenta de Google: para admins y cajeros creados por el dueño.
+     * Entrar con CÓDIGO DEL NEGOCIO + PIN, sin cuenta de Google ni usuario: el PIN identifica a la persona (no se repite entre las personas activas
+     * del negocio). Se comprueba el PIN contra TODAS las personas activas con PIN (≤ 10), siempre todas, para que el tiempo no delate nada.
      * El teléfono queda vinculado al negocio y con el poder máximo de esa persona (un cajero solo actúa como cajero). El dueño entra con Google.
-     * Cualquier fallo (código, usuario o PIN) responde igual; 5 fallos seguidos bloquean a esa persona 15 minutos y avisan al dueño y a los admins.
+     * Cualquier fallo (código o PIN) responde igual. Como no se sabe quién se equivoca, el bloqueo es por NEGOCIO: 10 fallos en 15 minutos
+     * pausan la entrada con código de ese negocio 15 minutos (429 LOCKED) y avisan una vez al dueño y a los admins. Además, 10 intentos/min por IP.
      */
-    // Los fallos también se guardan (contador y bloqueo de PIN): la excepción que corta la petición no debe deshacerlos.
+    // Los fallos también se guardan (contador y bloqueo): la excepción que corta la petición no debe deshacerlos.
     @Transactional(noRollbackFor = ApiException.class)
     public MemberLoginResult memberLogin(MemberLoginRequest in, String userAgent) {
         String code = in.businessCode() == null ? "" : in.businessCode().replaceAll("[^A-Za-z0-9]", "").toUpperCase();
-        String username = in.username() == null ? "" : in.username().trim();
         Instant now = clock.instant();
-        UUID businessId = jdbc.sql("SELECT id FROM business WHERE access_code = :c AND status = 'ACTIVE'").param("c", code).query(UUID.class).optional().orElse(null);
-        var member = businessId == null ? null : jdbc.sql("""
-                        SELECT id, display_name, role, pin_hash, pin_must_change, pin_failed_count, pin_locked_until
-                          FROM member WHERE business_id = :b AND lower(btrim(display_name)) = lower(btrim(:n)) AND status = 'ACTIVE' AND pin_hash IS NOT NULL
-                         ORDER BY created_at LIMIT 1 FOR UPDATE
-                        """)
-                .param("b", businessId).param("n", username)
-                .query((rs, n) -> new Object[] {rs.getObject("id", UUID.class), rs.getString("display_name"), rs.getString("role"), rs.getString("pin_hash"),
-                        rs.getBoolean("pin_must_change"), rs.getInt("pin_failed_count"), rs.getTimestamp("pin_locked_until")})
+        var business = jdbc.sql("""
+                        SELECT id, member_login_failures, member_login_window_start, member_login_locked_until
+                          FROM business WHERE access_code = :c AND status = 'ACTIVE' FOR UPDATE
+                        """).param("c", code)
+                .query((rs, n) -> new Object[] {rs.getObject("id", UUID.class), rs.getInt("member_login_failures"), rs.getTimestamp("member_login_window_start"),
+                        rs.getTimestamp("member_login_locked_until")})
                 .optional().orElse(null);
-        if (member != null && member[6] != null && ((Timestamp) member[6]).toInstant().isAfter(now)) {
+        if (business != null && business[3] != null && ((Timestamp) business[3]).toInstant().isAfter(now)) {
             throw ApiException.tooMany("LOCKED", "Too many failed attempts; try again later");
         }
-        boolean pinOk = in.pin() != null && pinEncoder.matches(in.pin(), member == null ? dummyPinHash : (String) member[3]);
-        if (member == null || !pinOk) {
-            if (member != null) {
-                int failures = (Integer) member[5] + 1;
-                boolean lock = failures >= MAX_PIN_FAILURES;
-                jdbc.sql("UPDATE member SET pin_failed_count = :f, pin_locked_until = :u WHERE id = :id").param("f", lock ? 0 : failures)
-                        .param("u", lock ? Timestamp.from(now.plus(PIN_LOCKOUT)) : null, java.sql.Types.TIMESTAMP).param("id", member[0]).update();
-                if (lock) {
-                    notifications.notify(businessId, com.cuadra.api.notification.NotificationService.Type.PIN_LOCKOUT, java.util.Map.of("memberName", (String) member[1]), null, null,
-                            "PIN_LOCKOUT:" + member[0] + ":" + now.getEpochSecond() / 900, "cuentiva://equipo");
-                }
-            }
-            throw ApiException.unauthorized("INVALID_CREDENTIALS", "Invalid business code, user or PIN");
+        UUID businessId = business == null ? null : (UUID) business[0];
+        List<Object[]> candidates = businessId == null ? List.of() : jdbc.sql("""
+                        SELECT id, display_name, role, pin_hash, pin_must_change
+                          FROM member WHERE business_id = :b AND status = 'ACTIVE' AND pin_hash IS NOT NULL ORDER BY created_at
+                        """)
+                .param("b", businessId)
+                .query((rs, n) -> new Object[] {rs.getObject("id", UUID.class), rs.getString("display_name"), rs.getString("role"), rs.getString("pin_hash"),
+                        rs.getBoolean("pin_must_change")})
+                .list();
+        String pin = in.pin() == null ? "" : in.pin().trim();
+        Object[] member = matchPin(pin, candidates);
+        if (member == null) {
+            if (businessId != null) recordBusinessFailure(businessId, business, now);
+            throw ApiException.unauthorized("INVALID_CREDENTIALS", "Invalid business code or PIN");
         }
         Role role = Role.valueOf((String) member[2]);
         if (role == Role.OWNER) throw ApiException.forbidden("OWNER_USES_GOOGLE", "The owner signs in with Google");
-        jdbc.sql("UPDATE member SET pin_failed_count = 0, pin_locked_until = NULL WHERE id = :id").param("id", member[0]).update();
+        jdbc.sql("UPDATE business SET member_login_failures = 0, member_login_window_start = NULL WHERE id = :b").param("b", businessId).update();
         plans.requireRoom(businessId, com.cuadra.api.plan.PlanService.Feature.DEVICES);
         UUID register = jdbc.sql("SELECT id FROM cash_register WHERE business_id = :b AND active ORDER BY name LIMIT 1").param("b", businessId).query(UUID.class).optional().orElse(null);
         UUID deviceId = UUID.randomUUID();
@@ -229,6 +230,31 @@ public class DeviceService {
         }
         audit.log(businessId, (UUID) member[0], null, deviceId, "device.member_login", "device", deviceId, role.name());
         return new MemberLoginResult(deviceId, token, businessId, (UUID) member[0], (String) member[1], role.name(), (Boolean) member[4]);
+    }
+
+    /** Compara el PIN con cada persona (todas, en paralelo: bcrypt es lento a propósito). Si no hay nadie, igual gasta un bcrypt. */
+    private Object[] matchPin(String pin, List<Object[]> candidates) {
+        if (!pin.matches("\\d{5}") || candidates.isEmpty()) {
+            pinEncoder.matches(pin.isEmpty() ? "0" : pin, dummyPinHash);
+            return null;
+        }
+        return candidates.parallelStream().filter(m -> pinEncoder.matches(pin, (String) m[3])).findFirst().orElse(null);
+    }
+
+    private void recordBusinessFailure(UUID businessId, Object[] business, Instant now) {
+        Timestamp windowStart = (Timestamp) business[2];
+        boolean inWindow = windowStart != null && windowStart.toInstant().plus(FAILURE_WINDOW).isAfter(now);
+        int failures = (inWindow ? (Integer) business[1] : 0) + 1;
+        boolean lock = failures >= MAX_BUSINESS_FAILURES;
+        jdbc.sql("UPDATE business SET member_login_failures = :f, member_login_window_start = :w, member_login_locked_until = :u WHERE id = :b")
+                .param("f", lock ? 0 : failures).param("w", lock ? null : Timestamp.from(inWindow ? windowStart.toInstant() : now), java.sql.Types.TIMESTAMP)
+                .param("u", lock ? Timestamp.from(now.plus(BUSINESS_LOCKOUT)) : null, java.sql.Types.TIMESTAMP).param("b", businessId).update();
+        if (lock) {
+            // Sin nombre: nadie sabe quién se equivocó. El aviso sale una vez por bloqueo.
+            notifications.notify(businessId, com.cuadra.api.notification.NotificationService.Type.PIN_LOCKOUT, java.util.Map.of("scope", "BUSINESS"), null, null,
+                    "PIN_LOCKOUT:BUSINESS:" + businessId + ":" + now.getEpochSecond(), "cuentiva://equipo");
+            audit.log(businessId, null, null, null, "auth.member_login_locked", "business", businessId, null);
+        }
     }
 
     public List<DeviceView> list(UUID businessId) {

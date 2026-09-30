@@ -30,7 +30,7 @@ class RateLimitTest extends ApiTestBase {
 
     @Test
     void guessingPinsFromOneAddressIsLimited() throws Exception {
-        String body = "{\"businessCode\":\"12345\",\"username\":\"Kevin\",\"pin\":\"11111\"}";
+        String body = "{\"businessCode\":\"12345\",\"pin\":\"11111\"}";
         for (int i = 0; i < 3; i++) mvc.perform(post("/api/auth/member-login").with(r -> { r.setRemoteAddr("10.1.1.1"); return r; }).contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isUnauthorized());
         mvc.perform(post("/api/auth/member-login").with(r -> { r.setRemoteAddr("10.1.1.1"); return r; }).contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isTooManyRequests());
     }

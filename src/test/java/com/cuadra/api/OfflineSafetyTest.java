@@ -54,13 +54,13 @@ class OfflineSafetyTest extends ApiTestBase {
         return JsonPath.read(call(get("/api/b/" + b), bearer(owner), null).andReturn().getResponse().getContentAsString(), "$.accessCode");
     }
 
-    private ResultActions memberLogin(String code, String user, String pin) throws Exception {
+    private ResultActions memberLogin(String code, String pin) throws Exception {
         return mvc.perform(post("/api/auth/member-login").contentType(MediaType.APPLICATION_JSON)
-                .content("{\"businessCode\":\"" + code + "\",\"username\":\"" + user + "\",\"pin\":\"" + pin + "\",\"deviceName\":\"Mi teléfono\",\"model\":\"X\"}"));
+                .content("{\"businessCode\":\"" + code + "\",\"pin\":\"" + pin + "\",\"deviceName\":\"Mi teléfono\",\"model\":\"X\"}"));
     }
 
     private String personalPhone(String owner, UUID b, String user) throws Exception {
-        return JsonPath.read(memberLogin(codeOf(owner, b), user, "12345").andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), "$.deviceToken");
+        return JsonPath.read(memberLogin(codeOf(owner, b), pinOf(b, user)).andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), "$.deviceToken");
     }
 
     // ---------- quién hizo cada operación ----------
@@ -150,15 +150,18 @@ class OfflineSafetyTest extends ApiTestBase {
     }
 
     @Test
-    void resettingAPinLiftsTheServerLockout() throws Exception {
+    void resettingAPinDoesNotLiftTheBusinessLockout() throws Exception {
         String owner = login("off-d");
         UUID b = createBusiness(owner, "Off D");
         UUID kevin = createPinMember(owner, b, "Kevin", "CASHIER");
         String code = codeOf(owner, b);
-        for (int i = 0; i < 5; i++) memberLogin(code, "Kevin", "00000").andExpect(status().isUnauthorized());
-        assertCode(memberLogin(code, "Kevin", "12345").andExpect(status().isTooManyRequests()), "LOCKED");
+        for (int i = 0; i < 10; i++) memberLogin(code, "00000").andExpect(status().isUnauthorized());
+        assertCode(memberLogin(code, pinOf(b, "Kevin")).andExpect(status().isTooManyRequests()), "LOCKED");
+        // El bloqueo es del negocio (no se sabe quién se equivocó): cambiar un PIN no lo levanta; pasa solo a los 15 minutos.
         call(put("/api/b/" + b + "/members/" + kevin + "/pin"), bearer(owner), "{\"pin\":\"24680\"}").andExpect(status().isNoContent());
-        memberLogin(code, "Kevin", "24680").andExpect(status().isOk());
+        assertCode(memberLogin(code, "24680").andExpect(status().isTooManyRequests()), "LOCKED");
+        baseJdbc.sql("UPDATE business SET member_login_locked_until = now() - interval '1 second' WHERE id = :b").param("b", b).update();
+        memberLogin(code, "24680").andExpect(status().isOk());
     }
 
     // ---------- límite de crédito ----------

@@ -58,7 +58,7 @@ class IdentityFlowTest extends ApiTestBase {
                 .andExpect(jsonPath("$.currency", is("NIO")))
                 .andExpect(jsonPath("$.timezone", is("America/Managua")))
                 .andExpect(jsonPath("$.inventoryMode", is("OFF")))
-                .andExpect(jsonPath("$.posViews[0]", is("TYPE")))
+                .andExpect(jsonPath("$.posViews[0]", is("TYPE"))).andExpect(jsonPath("$.posViews[1]", is("QUICK"))).andExpect(jsonPath("$.posViews[2]", is("LIST")))   // las dos pestañas por omisión
                 .andExpect(jsonPath("$.modules.inventory", is(false)))
                 .andExpect(jsonPath("$.modules.credit", is(true)))
                 .andReturn().getResponse().getContentAsString();
@@ -163,7 +163,7 @@ class IdentityFlowTest extends ApiTestBase {
         call(get("/api/me"), bearer(guest), null).andExpect(jsonPath("$.businesses[0].role", is("ADMIN")));
         // El admin crea cajeros y también otros admins con nombre y PIN, pero no edita los ajustes del negocio.
         call(post("/api/b/" + b + "/members"), bearer(guest), "{\"displayName\":\"Caj\",\"role\":\"CASHIER\",\"pin\":\"43215\"}").andExpect(status().isCreated());
-        call(post("/api/b/" + b + "/members"), bearer(guest), "{\"displayName\":\"Adm\",\"role\":\"ADMIN\",\"pin\":\"43215\"}").andExpect(status().isCreated());
+        call(post("/api/b/" + b + "/members"), bearer(guest), "{\"displayName\":\"Adm\",\"role\":\"ADMIN\",\"pin\":\"43216\"}").andExpect(status().isCreated());
         call(put("/api/b/" + b), bearer(guest), "{\"name\":\"Mío ahora\"}").andExpect(status().isForbidden());
     }
 

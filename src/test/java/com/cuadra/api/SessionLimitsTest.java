@@ -80,10 +80,10 @@ class SessionLimitsTest extends ApiTestBase {
         alive(admin, false);
     }
 
-    private String memberLogin(String code, String user) throws Exception {
+    private String memberLogin(String code, String pin) throws Exception {
         Thread.sleep(5);
         String json = mvc.perform(post("/api/auth/member-login").contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"businessCode\":\"" + code + "\",\"username\":\"" + user + "\",\"pin\":\"12345\",\"deviceName\":\"Tel\",\"model\":\"X\"}"))
+                        .content("{\"businessCode\":\"" + code + "\",\"pin\":\"" + pin + "\",\"deviceName\":\"Tel\",\"model\":\"X\"}"))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
         return JsonPath.read(json, "$.deviceToken");
     }
@@ -95,9 +95,9 @@ class SessionLimitsTest extends ApiTestBase {
         UUID kevin = createPinMember(owner, b, "Kevin", "CASHIER");
         UUID ana = createPinMember(owner, b, "Ana", "CASHIER");
         String code = JsonPath.read(call(get("/api/b/" + b), bearer(owner), null).andReturn().getResponse().getContentAsString(), "$.accessCode");
-        String k1 = memberLogin(code, "Kevin"), k2 = memberLogin(code, "Kevin"), a1 = memberLogin(code, "Ana");
+        String k1 = memberLogin(code, pinOf(b, "Kevin")), k2 = memberLogin(code, pinOf(b, "Kevin")), a1 = memberLogin(code, pinOf(b, "Ana"));
         asDevice(get("/api/b/" + b + "/members"), k1, kevin, null).andExpect(status().isOk());
-        String k3 = memberLogin(code, "Kevin");
+        String k3 = memberLogin(code, pinOf(b, "Kevin"));
         asDevice(get("/api/b/" + b + "/members"), k1, kevin, null).andExpect(status().isUnauthorized());
         asDevice(get("/api/b/" + b + "/members"), k2, kevin, null).andExpect(status().isOk());
         asDevice(get("/api/b/" + b + "/members"), k3, kevin, null).andExpect(status().isOk());

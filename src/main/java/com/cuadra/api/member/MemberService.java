@@ -67,6 +67,7 @@ public class MemberService {
         requireManage(ctx, req.role());
         validatePin(req.pin());
         requireUniqueName(ctx.businessId(), req.displayName(), null);
+        List<UUID> clashingDisabled = requirePinFree(ctx.businessId(), req.pin(), null);
         // Un límite de plan solo impide AGREGAR gente; quien ya está sigue trabajando.
         plans.requireRoom(ctx.businessId(), com.cuadra.api.plan.PlanService.Feature.MEMBERS);
         UUID id = UUID.randomUUID();
@@ -76,6 +77,7 @@ public class MemberService {
                         """)
                 .param("id", id).param("b", ctx.businessId()).param("n", req.displayName().trim()).param("r", req.role().name())
                 .param("pin", pinEncoder.encode(req.pin())).param("must", req.mustChangePin()).param("by", ctx.memberId()).update();
+        markPinConflicts(ctx.businessId(), clashingDisabled);
         audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "member.create", "member", id, req.role().name());
         return get(ctx.businessId(), id);
     }
@@ -100,6 +102,12 @@ public class MemberService {
             throw ApiException.badRequest("INVALID_STATUS", "Invalid status");
         }
         if (req.displayName() != null) requireUniqueName(ctx.businessId(), req.displayName(), memberId);
+        if ("ACTIVE".equals(req.status()) && "DISABLED".equals(target.status())) {
+            // Mientras estuvo de baja, alguien activo quedó con su mismo PIN: primero hay que darle un PIN nuevo.
+            boolean conflict = jdbc.sql("SELECT pin_conflict FROM member WHERE id = :id AND business_id = :b").param("id", memberId).param("b", ctx.businessId())
+                    .query(Boolean.class).optional().orElse(false);
+            if (conflict) throw ApiException.conflict("PIN_TAKEN", "Another active member of this business uses that PIN; set a new PIN first");
+        }
         var sets = new java.util.ArrayList<String>();
         if (req.displayName() != null) sets.add("display_name = :n");
         if (req.role() != null) sets.add("role = :r");
@@ -143,12 +151,14 @@ public class MemberService {
             requireManage(ctx, targetRole);
         }
         validatePin(pin);
+        List<UUID> clashingDisabled = requirePinFree(ctx.businessId(), pin, memberId);
         jdbc.sql("""
-                        UPDATE member SET pin_hash = :h, pin_set_at = now(), pin_must_change = :m, pin_failed_count = 0, pin_locked_until = NULL,
+                        UPDATE member SET pin_hash = :h, pin_set_at = now(), pin_must_change = :m, pin_failed_count = 0, pin_locked_until = NULL, pin_conflict = false,
                                rev = nextval('change_rev_seq')
                          WHERE id = :id AND business_id = :b
                         """)
                 .param("h", pinEncoder.encode(pin)).param("m", mustChange).param("id", memberId).param("b", ctx.businessId()).update();
+        markPinConflicts(ctx.businessId(), clashingDisabled);
         audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "member.pin_reset", "member", memberId, null);
     }
 
@@ -210,6 +220,27 @@ public class MemberService {
     /** Administrar admins es del dueño; administrar cajeros, de dueño y admins. */
     private static void requireManage(MemberContext ctx, Role targetRole) {
         ctx.require(targetRole == Role.CASHIER ? Permission.MANAGE_CASHIERS : Permission.MANAGE_ADMINS);
+    }
+
+    /**
+     * El PIN identifica a la persona al entrar con código del negocio + PIN, así que no se repite entre las personas ACTIVAS del negocio
+     * (409 PIN_TAKEN). En la base solo hay hashes: se compara el PIN nuevo contra cada uno (≤ 10 personas; en paralelo porque bcrypt es lento).
+     * Devuelve las personas DADAS DE BAJA con ese mismo PIN: quedan marcadas y, para reactivarlas, primero necesitan un PIN nuevo.
+     */
+    private List<UUID> requirePinFree(UUID businessId, String pin, UUID except) {
+        record Holder(UUID id, boolean active, String hash) {}
+        // Dos altas a la vez con el mismo PIN: la segunda espera a la primera y la ve.
+        jdbc.sql("SELECT id FROM business WHERE id = :b FOR UPDATE").param("b", businessId).query(UUID.class).optional();
+        List<Holder> others = jdbc.sql("SELECT id, status, pin_hash FROM member WHERE business_id = :b AND pin_hash IS NOT NULL")
+                .param("b", businessId).query((rs, n) -> new Holder(rs.getObject("id", UUID.class), "ACTIVE".equals(rs.getString("status")), rs.getString("pin_hash")))
+                .list().stream().filter(h -> !h.id().equals(except)).toList();
+        List<Holder> same = others.parallelStream().filter(h -> pinEncoder.matches(pin, h.hash())).toList();
+        if (same.stream().anyMatch(Holder::active)) throw ApiException.conflict("PIN_TAKEN", "Another active member of this business uses that PIN");
+        return same.stream().map(Holder::id).toList();
+    }
+
+    private void markPinConflicts(UUID businessId, List<UUID> members) {
+        for (UUID m : members) jdbc.sql("UPDATE member SET pin_conflict = true WHERE id = :id AND business_id = :b").param("id", m).param("b", businessId).update();
     }
 
     private static void validatePin(String pin) {

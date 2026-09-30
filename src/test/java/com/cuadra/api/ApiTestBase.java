@@ -103,11 +103,24 @@ abstract class ApiTestBase {
     }
 
     /** Crea un miembro con PIN y devuelve su id. */
+    /** El PIN identifica a la persona dentro del negocio (no se repite): cada alta de prueba recibe uno distinto; `pinOf` lo recuerda. */
+    private static final java.util.concurrent.atomic.AtomicInteger NEXT_PIN = new java.util.concurrent.atomic.AtomicInteger(30000);
+    private static final java.util.Map<String, String> PINS = new java.util.concurrent.ConcurrentHashMap<>();
+
     protected UUID createPinMember(String ownerToken, UUID businessId, String name, String role) throws Exception {
+        return createPinMember(ownerToken, businessId, name, role, String.valueOf(NEXT_PIN.getAndIncrement()));
+    }
+
+    protected UUID createPinMember(String ownerToken, UUID businessId, String name, String role, String pin) throws Exception {
         String json = call(post("/api/b/" + businessId + "/members"), bearer(ownerToken),
-                "{\"displayName\":\"" + name + "\",\"role\":\"" + role + "\",\"pin\":\"12345\"}")
+                "{\"displayName\":\"" + name + "\",\"role\":\"" + role + "\",\"pin\":\"" + pin + "\"}")
                 .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
+        PINS.put(businessId + "/" + name.trim().toLowerCase(), pin);
         return UUID.fromString(JsonPath.read(json, "$.id"));
+    }
+
+    protected String pinOf(UUID businessId, String name) {
+        return java.util.Objects.requireNonNull(PINS.get(businessId + "/" + name.trim().toLowerCase()), "sin PIN para " + name);
     }
 
     @Autowired protected org.springframework.jdbc.core.simple.JdbcClient baseJdbc;

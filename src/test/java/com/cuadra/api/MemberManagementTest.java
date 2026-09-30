@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 /** Quién gestiona a quién: el dueño a todos; el admin a todos menos al dueño; el cajero solo a sí mismo (su propio PIN). */
 class MemberManagementTest extends ApiTestBase {
     private static final String PIN = "{\"pin\":\"98765\"}";
+    private static final String PIN2 = "{\"pin\":\"98764\"}";
 
     @Test
     void theOwnerManagesEveryone() throws Exception {
@@ -20,7 +21,7 @@ class MemberManagementTest extends ApiTestBase {
         UUID cashier = createPinMember(owner, b, "Caja", "CASHIER");
         UUID admin = createPinMember(owner, b, "Admin", "ADMIN");
         call(put("/api/b/" + b + "/members/" + cashier + "/pin"), bearer(owner), PIN).andExpect(status().isNoContent());
-        call(put("/api/b/" + b + "/members/" + admin + "/pin"), bearer(owner), PIN).andExpect(status().isNoContent());
+        call(put("/api/b/" + b + "/members/" + admin + "/pin"), bearer(owner), PIN2).andExpect(status().isNoContent());
         call(put("/api/b/" + b + "/members/" + admin), bearer(owner), "{\"displayName\":\"Admin 2\",\"status\":\"DISABLED\"}").andExpect(status().isOk()).andExpect(jsonPath("$.status", is("DISABLED")));
         call(put("/api/b/" + b + "/members/" + cashier), bearer(owner), "{\"role\":\"ADMIN\"}").andExpect(status().isOk()).andExpect(jsonPath("$.role", is("ADMIN")));
     }
@@ -34,7 +35,7 @@ class MemberManagementTest extends ApiTestBase {
         UUID cashier = createPinMember(owner, b, "Caja", "CASHIER");
         UUID otherAdmin = createPinMember(owner, b, "Otro admin", "ADMIN");
         call(put("/api/b/" + b + "/members/" + cashier + "/pin"), bearer(admin), PIN).andExpect(status().isNoContent());
-        call(put("/api/b/" + b + "/members/" + otherAdmin + "/pin"), bearer(admin), PIN).andExpect(status().isNoContent());
+        call(put("/api/b/" + b + "/members/" + otherAdmin + "/pin"), bearer(admin), PIN2).andExpect(status().isNoContent());
         call(put("/api/b/" + b + "/members/" + otherAdmin), bearer(admin), "{\"displayName\":\"Renombrado\"}").andExpect(status().isOk()).andExpect(jsonPath("$.displayName", is("Renombrado")));
         call(put("/api/b/" + b + "/members/" + otherAdmin), bearer(admin), "{\"status\":\"DISABLED\"}").andExpect(status().isOk());
         // Al dueño no: ni sus datos, ni su rol, ni su estado, ni su PIN.

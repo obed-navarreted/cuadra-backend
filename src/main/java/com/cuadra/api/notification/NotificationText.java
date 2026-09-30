@@ -49,7 +49,10 @@ final class NotificationText {
             }
             case DEVICE_STALE -> es ? new Text("Un teléfono no ha sincronizado", s(a, "deviceName") + " tiene " + s(a, "pending") + " operaciones sin enviar.")
                     : new Text("A phone has not synced", s(a, "deviceName") + " has " + s(a, "pending") + " operations waiting.");
-            case PIN_LOCKOUT -> es ? new Text("PIN bloqueado", s(a, "memberName") + " se equivocó varias veces con el PIN.") : new Text("PIN locked", s(a, "memberName") + " entered the wrong PIN several times.");
+            case PIN_LOCKOUT -> "BUSINESS".equals(a.get("scope"))
+                    ? (es ? new Text("Entrada con código en pausa", "Se probaron " + "10" + " PIN incorrectos con el código del negocio. Nadie puede entrar con código y PIN durante 15 minutos.")
+                          : new Text("Code sign-in paused", "10" + " wrong PINs were tried with the business code. Nobody can sign in with code and PIN for 15 minutes."))
+                    : es ? new Text("PIN bloqueado", s(a, "memberName") + " se equivocó varias veces con el PIN.") : new Text("PIN locked", s(a, "memberName") + " entered the wrong PIN several times.");
             case MEMBER_JOINED -> es ? new Text("Se unió alguien al equipo", s(a, "memberName") + " aceptó tu invitación.") : new Text("Someone joined the team", s(a, "memberName") + " accepted your invitation.");
             case DAILY_SUMMARY -> es ? new Text("Resumen del día", s(a, "salesCount") + " ventas por " + money(l(a, "totalMinor"), currency) + ". Gastos: " + money(l(a, "expensesMinor"), currency) + ".")
                     : new Text("Daily summary", s(a, "salesCount") + " sales for " + money(l(a, "totalMinor"), currency) + ". Expenses: " + money(l(a, "expensesMinor"), currency) + ".");
