@@ -9,7 +9,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-/** Configuración remota pública: versión mínima, enlace de "Invítame un café" y su modo por canal (sección 8.3 del plan). */
+/** Configuración remota pública: versión mínima y contacto de soporte/apoyo (correo y WhatsApp, editables sin lanzar versión). */
 @RestController
 @RequestMapping("/api/config")
 public class ConfigController {
@@ -23,8 +23,18 @@ public class ConfigController {
         this.announcements = announcements;
     }
 
-    public record PublicConfig(String minAppVersion, String donationUrl, String donationMode, String supportEmail,
-                              String recommendedAppVersion, AnnouncementService.AnnouncementBanner announcement) {}
+    /** `panelUrl`: el panel web (la consola de la plataforma vive en `panelUrl + "/console"`; la app la abre en el navegador). */
+    public record PublicConfig(String minAppVersion, String supportEmail, String supportWhatsapp,
+                              String recommendedAppVersion, AnnouncementService.AnnouncementBanner announcement, String panelUrl) {}
+
+    /** Un país con la moneda, zona horaria e idioma que sugiere al crear un negocio (todo editable). */
+    public record Country(String code, String currency, String timezone, String locale) {}
+
+    @GetMapping("/countries")
+    public java.util.List<Country> countries() {
+        return com.cuadra.api.business.CountryDefaults.all().entrySet().stream()
+                .map(e -> new Country(e.getKey(), e.getValue().currency(), e.getValue().timezone(), e.getValue().locale())).toList();
+    }
 
     @GetMapping
     public PublicConfig get() {
@@ -36,10 +46,10 @@ public class ConfigController {
         }).list();
         return new PublicConfig(
                 remote.getOrDefault("min_app_version", props.app().minAppVersion()),
-                remote.getOrDefault("donation_url", props.app().donationUrl()),
-                remote.getOrDefault("donation_mode", props.app().donationMode()),
-                props.support().inboxEmail(),
+                remote.getOrDefault("support_email", props.support().inboxEmail()),
+                remote.getOrDefault("support_whatsapp", props.support().whatsapp()),
                 remote.get("recommended_app_version"),
-                announcements.activeBanner().orElse(null));
+                announcements.activeBanner().orElse(null),
+                props.app().baseUrl() == null ? null : props.app().baseUrl().replaceAll("/+$", ""));
     }
 }

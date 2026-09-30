@@ -32,10 +32,20 @@ public class PlanService {
 
     public record PlanView(String plan, String status, Instant trialEndsAt, Instant currentPeriodEnd, boolean trialing, int trialDaysLeft, Limits limits, Usage usage) {}
 
+    /**
+     * Interruptor de suscripciones. En esta versión TODO ES GRATIS: cada negocio tiene las funciones completas ({@link #ALL_FREE}) y el único límite son
+     * 10 personas. El código de planes/suscripciones (Gratis/Pro, prueba, consola) queda dormido para volver con Google Play Billing: con `true` rigen
+     * {@link #FREE} y {@link #PRO} otra vez.
+     */
+    static final boolean SUBSCRIPTIONS_ENABLED = false;
+    /** Personas por negocio en la versión gratuita. */
+    public static final int FREE_VERSION_MEMBERS = 10;
+
+    private static final List<String> ALL_SECTIONS = List.of("resumen", "ventas", "fiados", "gastos", "inventario", "cierres", "reportes", "equipo", "avisos", "ajustes", "ayuda");
+    private static final Limits ALL_FREE = new Limits(FREE_VERSION_MEMBERS, 20, 50, -1, true, true, ALL_SECTIONS);
     private static final Limits FREE = new Limits(3, 2, 3, 30, false, false, List.of("resumen", "fiados", "ajustes", "ayuda"));
     /** "Ilimitado (uso justo)" es un tope alto, no infinito. */
-    private static final Limits PRO = new Limits(100, 10, 50, -1, true, true,
-            List.of("resumen", "ventas", "fiados", "gastos", "inventario", "cierres", "reportes", "equipo", "avisos", "ajustes", "ayuda"));
+    private static final Limits PRO = new Limits(100, 10, 50, -1, true, true, ALL_SECTIONS);
     static final Duration PAST_DUE_GRACE = Duration.ofDays(7);
     static final int TRIAL_DAYS = 30;
 
@@ -75,9 +85,9 @@ public class PlanService {
         };
     }
 
-    public Limits limits(PlanCode plan) { return plan == PlanCode.PRO ? PRO : FREE; }
+    public Limits limits(PlanCode plan) { return !SUBSCRIPTIONS_ENABLED ? ALL_FREE : plan == PlanCode.PRO ? PRO : FREE; }
 
-    public Limits limits(UUID businessId) { return limits(effective(businessId)); }
+    public Limits limits(UUID businessId) { return !SUBSCRIPTIONS_ENABLED ? ALL_FREE : limits(effective(businessId)); }
 
     public Usage usage(UUID businessId) {
         int members = jdbc.sql("SELECT count(*) FROM member WHERE business_id = :b AND status = 'ACTIVE'").param("b", businessId).query(Integer.class).single();
@@ -129,14 +139,19 @@ public class PlanService {
      * Un dueño puede tener más de un negocio solo si alguno de los suyos está en Pro (el cobro es por negocio). Su primer negocio siempre se puede crear.
      */
     public void requireCanCreateBusiness(UUID userId) {
+        if (!SUBSCRIPTIONS_ENABLED) return;
         List<UUID> owned = jdbc.sql("SELECT business_id FROM member WHERE user_account_id = :u AND role = 'OWNER' AND status = 'ACTIVE'").param("u", userId).query(UUID.class).list();
         if (owned.isEmpty()) return;
         boolean anyPro = owned.stream().anyMatch(b -> effective(b) == PlanCode.PRO);
         if (!anyPro) throw new PlanLimitException(Feature.BUSINESSES, 1);
     }
 
-    /** Nuevo negocio: 30 días de prueba de Pro. */
+    /** Nuevo negocio: 30 días de prueba de Pro (solo con suscripciones activas; hoy no hay prueba: la fila queda Gratis/MANUAL, sin efecto). */
     public void startTrial(UUID businessId) {
+        if (!SUBSCRIPTIONS_ENABLED) {
+            jdbc.sql("INSERT INTO subscription (business_id, plan_code, status) VALUES (:b, 'FREE', 'MANUAL')").param("b", businessId).update();
+            return;
+        }
         jdbc.sql("INSERT INTO subscription (business_id, plan_code, status, trial_ends_at) VALUES (:b, 'PRO', 'TRIALING', :t)")
                 .param("b", businessId).param("t", Timestamp.from(clock.instant().plus(TRIAL_DAYS, ChronoUnit.DAYS))).update();
     }

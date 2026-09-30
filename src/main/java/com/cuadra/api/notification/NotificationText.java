@@ -29,6 +29,24 @@ final class NotificationText {
             case SHIFT_NOT_CLOSED -> es ? new Text("Caja sin cerrar", "El turno de " + s(a, "memberName") + " sigue abierto.") : new Text("Register not closed", s(a, "memberName") + "'s shift is still open.");
             case SALE_DELETED -> es ? new Text("Venta eliminada", s(a, "memberName") + " eliminó una venta de " + money(l(a, "totalMinor"), currency) + ".")
                     : new Text("Sale deleted", s(a, "memberName") + " deleted a sale of " + money(l(a, "totalMinor"), currency) + ".");
+            case SALE_CONFLICT -> es ? new Text("Venta para revisar", "Una venta de " + money(l(a, "totalMinor"), currency) + " de " + s(a, "memberName")
+                            + " chocó con una cuenta ya cobrada o descartada en otro teléfono. Se guardó aparte: revisa si es un duplicado.")
+                    : new Text("Sale to review", "A sale of " + money(l(a, "totalMinor"), currency) + " by " + s(a, "memberName")
+                            + " clashed with a ticket already charged or discarded on another phone. It was saved separately: check whether it is a duplicate.");
+            case SALE_RETURNED -> es ? new Text("Devolución", s(a, "memberName") + " devolvió " + money(l(a, "totalMinor"), currency) + " de una venta. Motivo: " + s(a, "reason") + ".")
+                    : new Text("Return", s(a, "memberName") + " refunded " + money(l(a, "totalMinor"), currency) + " of a sale. Reason: " + s(a, "reason") + ".");
+            case SALE_UNDONE -> es ? new Text("Venta anulada", s(a, "memberName") + " anuló su última venta de " + money(l(a, "totalMinor"), currency) + ". Motivo: " + s(a, "reason") + ".")
+                    : new Text("Sale undone", s(a, "memberName") + " undid their last sale of " + money(l(a, "totalMinor"), currency) + ". Reason: " + s(a, "reason") + ".");
+            case LATE_AFTER_DISABLE -> es ? new Text("Llegó después de la baja", s(a, "count") + " operaciones de " + s(a, "memberName") + " (" + money(l(a, "amountMinor"), currency)
+                            + ") llegaron después de su baja. Se aceptaron porque se hicieron antes; revísalas en Ventas.")
+                    : new Text("Arrived after deactivation", s(a, "count") + " operations by " + s(a, "memberName") + " (" + money(l(a, "amountMinor"), currency)
+                            + ") arrived after they were deactivated. They were accepted because they were made before; review them in Sales.");
+            case PRICE_CHANGED -> {
+                boolean price = a.containsKey("toPriceMinor");
+                String change = price ? money(l(a, "fromPriceMinor"), currency) + " → " + money(l(a, "toPriceMinor"), currency) : "";
+                yield es ? new Text("Cambio de precio: " + s(a, "productName"), s(a, "memberName") + (price ? " cambió el precio: " + change : " cambió el costo") + ".")
+                        : new Text("Price change: " + s(a, "productName"), s(a, "memberName") + (price ? " changed the price: " + change : " changed the cost") + ".");
+            }
             case DEVICE_STALE -> es ? new Text("Un teléfono no ha sincronizado", s(a, "deviceName") + " tiene " + s(a, "pending") + " operaciones sin enviar.")
                     : new Text("A phone has not synced", s(a, "deviceName") + " has " + s(a, "pending") + " operations waiting.");
             case PIN_LOCKOUT -> es ? new Text("PIN bloqueado", s(a, "memberName") + " se equivocó varias veces con el PIN.") : new Text("PIN locked", s(a, "memberName") + " entered the wrong PIN several times.");

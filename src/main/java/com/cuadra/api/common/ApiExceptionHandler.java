@@ -24,6 +24,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(ApiException.class)
     public ProblemDetail handleApi(ApiException e) {
         ProblemDetail pd = problem(e.status(), e.code(), e.getMessage());
+        e.details().forEach(pd::setProperty);
         if (e instanceof com.cuadra.api.catalog.ProductService.CodeInUse c) pd.setProperty("existingId", c.existingId());
         if (e instanceof com.cuadra.api.cash.ShiftService.DevicesPending d) pd.setProperty("devices", d.devices());
         if (e instanceof com.cuadra.api.plan.PlanLimitException l) {

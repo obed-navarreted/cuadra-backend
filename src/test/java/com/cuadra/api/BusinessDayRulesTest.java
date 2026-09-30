@@ -83,7 +83,7 @@ class BusinessDayRulesTest extends ApiTestBase {
     @Test
     void theSqlFunctionAgreesWithTheJavaRule() {
         UUID b = UUID.randomUUID();
-        jdbc.sql("INSERT INTO business (id, name, country, currency, timezone) VALUES (:b, 'SQL', 'NI', 'NIO', 'America/Managua')").param("b", b).update();
+        jdbc.sql("INSERT INTO business (id, name, country, currency, timezone, access_code) VALUES (:b, 'SQL', 'NI', 'NIO', 'America/Managua', :c)").param("b", b).param("c", String.valueOf(10000 + Math.abs(b.hashCode() % 90000))).update();
         jdbc.sql("DELETE FROM business_day_rule WHERE business_id = :b").param("b", b).update();
         List<Rule> rules = List.of(new Rule(BusinessDayService.SINCE_FOREVER, MANAGUA, LocalTime.of(2, 0)), new Rule(LocalDate.of(2026, 10, 10), BOGOTA, LocalTime.of(3, 30)));
         for (Rule r : rules) {

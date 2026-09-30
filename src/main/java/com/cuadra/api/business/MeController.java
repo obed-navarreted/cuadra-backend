@@ -27,7 +27,10 @@ public class MeController {
     private final JdbcClient jdbc;
     private final Clock clock;
 
-    public MeController(JdbcClient jdbc, Clock clock) {
+    private final com.cuadra.api.security.AuthService auth;
+
+    public MeController(JdbcClient jdbc, Clock clock, com.cuadra.api.security.AuthService auth) {
+        this.auth = auth;
         this.jdbc = jdbc;
         this.clock = clock;
     }
@@ -81,6 +84,15 @@ public class MeController {
                                google_sub = 'deleted-' || id, full_name = NULL, photo_url = NULL WHERE id = :u
                         """)
                 .param("now", now).param("u", actor.userId()).update();
+    }
+
+    public record RevokedSessions(int revoked) {}
+
+    /** "Cerrar todas mis sesiones": cierra todas las sesiones de quien llama (web y teléfono) menos la actual. */
+    @org.springframework.web.bind.annotation.PostMapping("/sessions/revoke-all")
+    public RevokedSessions revokeAllSessions(@AuthenticationPrincipal Actor actor) {
+        requireUser(actor);
+        return new RevokedSessions(auth.revokeAllExcept(actor.userId(), actor.sessionId()));
     }
 
     private MeView view(UUID userId) {

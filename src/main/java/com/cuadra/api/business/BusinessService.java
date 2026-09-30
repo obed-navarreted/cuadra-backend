@@ -43,7 +43,11 @@ public class BusinessService {
                                List<String> posViews, boolean creditRequiresCustomer, Integer creditDefaultDueDays,
                                int creditOverdueDays, boolean creditLimitEnforced, boolean shiftRequired, Long shiftNoteThresholdMinor, String status,
                                /** Reglas de zona/corte con su historial (la última puede regir desde una jornada futura) y, si hay una pendiente, desde cuándo. */
-                               List<DayRuleView> dayRules, LocalDate dayRuleEffectiveFrom) {}
+                               List<DayRuleView> dayRules, LocalDate dayRuleEffectiveFrom,
+                               /** Código corto del negocio: con él, un usuario y su PIN, las personas del equipo entran desde su teléfono (no es secreto; el acceso lo dan usuario + PIN). */
+                               String accessCode,
+                               /** La moneda ya no se puede cambiar: hay actividad (ventas, gastos, fiados…) registrada en ella. Antes de la primera, sí. */
+                               boolean currencyLocked) {}
 
     public record DayRuleView(LocalDate from, String timezone, String dayCutoff) {}
 
@@ -54,7 +58,16 @@ public class BusinessService {
                                  Boolean creditRequiresCustomer, Integer creditDefaultDueDays, Integer creditOverdueDays,
                                  Boolean creditLimitEnforced, Boolean shiftRequired, Long shiftNoteThresholdMinor,
                                  /** En una actualización parcial un valor ausente significa "sin cambio"; para dejar estos dos SIN valor se pide explícitamente. */
-                                 Boolean clearCreditDefaultDueDays, Boolean clearShiftNoteThreshold) {}
+                                 Boolean clearCreditDefaultDueDays, Boolean clearShiftNoteThreshold,
+                                 /** País (código ISO de 2 letras): da el prefijo de WhatsApp y las sugerencias; se puede corregir cuando sea. */
+                                 String country) {
+        public UpdateBusiness(String name, String type, String currency, String timezone, String defaultLocale, String dayCutoff, Map<String, Boolean> modules,
+                              List<String> posViews, Boolean creditRequiresCustomer, Integer creditDefaultDueDays, Integer creditOverdueDays, Boolean creditLimitEnforced,
+                              Boolean shiftRequired, Long shiftNoteThresholdMinor, Boolean clearCreditDefaultDueDays, Boolean clearShiftNoteThreshold) {
+            this(name, type, currency, timezone, defaultLocale, dayCutoff, modules, posViews, creditRequiresCustomer, creditDefaultDueDays, creditOverdueDays,
+                    creditLimitEnforced, shiftRequired, shiftNoteThresholdMinor, clearCreditDefaultDueDays, clearShiftNoteThreshold, null);
+        }
+    }
 
     /** Crea el negocio, su dueño y la "Caja 1". Un solo campo obligatorio: el nombre (5.0 del plan). */
     @Transactional
@@ -73,11 +86,11 @@ public class BusinessService {
 
         UUID businessId = UUID.randomUUID();
         jdbc.sql("""
-                        INSERT INTO business (id, name, type, country, currency, timezone, default_locale, day_cutoff)
-                        VALUES (:id, :n, :t, :c, :cur, :tz, :loc, :cut)
+                        INSERT INTO business (id, name, type, country, currency, timezone, default_locale, day_cutoff, access_code)
+                        VALUES (:id, :n, :t, :c, :cur, :tz, :loc, :cut, :code)
                         """)
                 .param("id", businessId).param("n", req.name().trim()).param("t", req.type()).param("c", country)
-                .param("cur", currency).param("tz", timezone).param("loc", locale).param("cut", defaultCutoff(timezone)).update();
+                .param("cur", currency).param("tz", timezone).param("loc", locale).param("cut", defaultCutoff(timezone)).param("code", newAccessCode()).update();
         jdbc.sql("INSERT INTO business_day_rule (business_id, effective_from, timezone, day_cutoff, created_by) VALUES (:b, :f, :tz, :cut, :u)")
                 .param("b", businessId).param("f", BusinessDayService.SINCE_FOREVER).param("tz", timezone).param("cut", defaultCutoff(timezone)).param("u", userId).update();
 
@@ -100,6 +113,48 @@ public class BusinessService {
         return get(businessId);
     }
 
+    private static final java.security.SecureRandom RANDOM = new java.security.SecureRandom();
+
+    /** Un código de 5 dígitos (sin cero inicial, fácil de decir y de recordar), único entre negocios. */
+    private String newAccessCode() {
+        for (int i = 0; i < 50; i++) {
+            String code = String.valueOf(10000 + RANDOM.nextInt(90000));
+            if (jdbc.sql("SELECT count(*) FROM business WHERE access_code = :c").param("c", code).query(Integer.class).single() == 0) return code;
+        }
+        throw new IllegalStateException("No se pudo generar un código de negocio");
+    }
+
+    /** El dueño elige un código propio de 5 dígitos (por ejemplo el que ya usa su equipo): tiene que estar libre. */
+    @Transactional
+    public String setAccessCode(UUID businessId, UUID memberId, UUID userId, String requested) {
+        String code = requested == null ? "" : requested.trim();
+        if (!code.matches("[1-9]\\d{4}")) throw ApiException.badRequest("INVALID_ACCESS_CODE", "The code must be 5 digits");
+        try {
+            // Con el aislamiento por negocio (RLS) no se ven los códigos de otros negocios: el índice único es quien lo decide.
+            jdbc.sql("UPDATE business SET access_code = :c, rev = nextval('change_rev_seq') WHERE id = :b").param("c", code).param("b", businessId).update();
+        } catch (org.springframework.dao.DuplicateKeyException e) {
+            throw ApiException.conflict("ACCESS_CODE_TAKEN", "That code is already used by another business");
+        }
+        audit.log(businessId, memberId, userId, null, "business.access_code_set", "business", businessId, null);
+        return code;
+    }
+
+    /** El dueño renueva el código (por ejemplo si se filtró): quien ya tiene su teléfono vinculado no se ve afectado; los nuevos usan el código nuevo. */
+    @Transactional
+    public String regenerateAccessCode(UUID businessId, UUID memberId, UUID userId) {
+        for (int i = 0; i < 50; i++) {
+            String code = String.valueOf(10000 + RANDOM.nextInt(90000));
+            try {
+                jdbc.sql("UPDATE business SET access_code = :c, rev = nextval('change_rev_seq') WHERE id = :b").param("c", code).param("b", businessId).update();
+            } catch (org.springframework.dao.DuplicateKeyException e) {
+                continue;   // choque con otro negocio (invisible por RLS): se prueba otro
+            }
+            audit.log(businessId, memberId, userId, null, "business.access_code_regenerated", "business", businessId, null);
+            return code;
+        }
+        throw new IllegalStateException("No se pudo generar un código de negocio");
+    }
+
     /**
      * Corte por defecto de la jornada: 02:00, como en ARMarket; 04:00 si la zona cambia de hora en verano (a las 02:00 hay un salto o una hora repetida
      * y la jornada no debería empezar justo ahí).
@@ -119,7 +174,7 @@ public class BusinessService {
                         json.readFlags(rs.getString("modules")), json.readList(rs.getString("pos_views")),
                         rs.getBoolean("credit_requires_customer"), (Integer) rs.getObject("credit_default_due_days"),
                         rs.getInt("credit_overdue_days"), rs.getBoolean("credit_limit_enforced"),
-                        rs.getBoolean("shift_required"), (Long) rs.getObject("shift_note_threshold_minor"), rs.getString("status"), List.of(), null))
+                        rs.getBoolean("shift_required"), (Long) rs.getObject("shift_note_threshold_minor"), rs.getString("status"), List.of(), null, rs.getString("access_code"), false))
                 .optional().map(this::withRules).orElseThrow(() -> ApiException.notFound("BUSINESS_NOT_FOUND", "Business not found"));
     }
 
@@ -128,7 +183,16 @@ public class BusinessService {
         List<DayRuleView> rules = info.rules().stream().map(r -> new DayRuleView(r.from(), r.zone().getId(), r.cutoff().toString())).toList();
         return new BusinessView(b.id(), b.name(), b.type(), b.country(), b.currency(), b.timezone(), b.defaultLocale(), b.dayCutoff(), b.inventoryMode(), b.modules(),
                 b.posViews(), b.creditRequiresCustomer(), b.creditDefaultDueDays(), b.creditOverdueDays(), b.creditLimitEnforced(), b.shiftRequired(),
-                b.shiftNoteThresholdMinor(), b.status(), rules, info.pendingFrom(clock.instant()));
+                b.shiftNoteThresholdMinor(), b.status(), rules, info.pendingFrom(clock.instant()), b.accessCode(), hasActivity(b.id()));
+    }
+
+    /** Hay algo registrado con dinero (ventas, turnos, gastos, movimientos, fiados): la moneda queda fija y la zona u hora de corte rigen desde mañana. */
+    boolean hasActivity(UUID businessId) {
+        return Boolean.TRUE.equals(jdbc.sql("""
+                        SELECT EXISTS (SELECT 1 FROM sale WHERE business_id = :b) OR EXISTS (SELECT 1 FROM shift WHERE business_id = :b)
+                            OR EXISTS (SELECT 1 FROM expense WHERE business_id = :b) OR EXISTS (SELECT 1 FROM cash_movement WHERE business_id = :b)
+                            OR EXISTS (SELECT 1 FROM credit WHERE business_id = :b)
+                        """).param("b", businessId).query(Boolean.class).single());
     }
 
     /**
@@ -164,7 +228,16 @@ public class BusinessService {
         Map<String, Object> params = new LinkedHashMap<>();
         set(sets, params, "name", req.name() == null ? null : req.name().trim());
         set(sets, params, "type", req.type());
-        set(sets, params, "currency", req.currency() == null ? null : req.currency().toUpperCase());
+        if (req.currency() != null && !req.currency().equalsIgnoreCase(current.currency())) {
+            if (!req.currency().trim().matches("[A-Za-z]{3}")) throw ApiException.badRequest("INVALID_CURRENCY", "Currency must be a 3-letter code");
+            // Cambiar la moneda con ventas registradas cambiaría el valor de todo lo anterior: solo antes de la primera actividad.
+            if (current.currencyLocked()) throw ApiException.conflict("CURRENCY_LOCKED", "The currency cannot change once there is activity");
+            set(sets, params, "currency", req.currency().trim().toUpperCase());
+        }
+        if (req.country() != null) {
+            if (!req.country().trim().matches("[A-Za-z]{2}")) throw ApiException.badRequest("INVALID_COUNTRY", "Country must be a 2-letter code");
+            set(sets, params, "country", req.country().trim().toUpperCase());
+        }
         if (req.timezone() != null) {
             try {
                 ZoneId.of(req.timezone());

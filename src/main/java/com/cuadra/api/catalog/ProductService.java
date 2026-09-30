@@ -27,8 +27,10 @@ public class ProductService {
     private final JdbcClient jdbc;
     private final Audit audit;
     private final tools.jackson.databind.json.JsonMapper mapper;
+    private final com.cuadra.api.notification.NotificationService notifications;
 
-    public ProductService(JdbcClient jdbc, Audit audit, tools.jackson.databind.json.JsonMapper mapper) {
+    public ProductService(JdbcClient jdbc, Audit audit, tools.jackson.databind.json.JsonMapper mapper, com.cuadra.api.notification.NotificationService notifications) {
+        this.notifications = notifications;
         this.jdbc = jdbc;
         this.audit = audit;
         this.mapper = mapper;
@@ -104,6 +106,7 @@ public class ProductService {
                     .param("active", active).update();
             if (cur.priceMinor() != p.priceMinor() || !java.util.Objects.equals(cur.costMinor(), p.costMinor())) {
                 priceHistory(ctx, id, p.priceMinor(), p.costMinor());
+                if (ctx.role() == com.cuadra.api.tenancy.Role.CASHIER) notifyPriceChanged(ctx, id, cur, p);
             }
             audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "product.update", "product", id, changesDetail(cur, p, active));
             return new Result(get(ctx.businessId(), id), Outcome.UPDATED);
@@ -112,6 +115,49 @@ public class ProductService {
             // Carrera entre dos teléfonos con el mismo código: el índice único es la última barrera.
             throw ApiException.conflict("BARCODE_IN_USE", "Code already in use");
         }
+    }
+
+    /** Campos que un cambio parcial (`PRODUCT_PATCH`) puede tocar: los mismos de `ProductInput`. */
+    private static final List<String> PATCHABLE = List.of("barcode", "shortCode", "name", "variant", "categoryId", "unit", "pricing", "priceMinor", "costMinor",
+            "isQuick", "quickPosition", "color", "trackStock", "minStockMilli", "active");
+
+    /**
+     * Cambio PARCIAL: `{"set": {campo: valor, ...}, "baseRev": n}`. Solo se aplican los campos de `set` (un valor nulo explícito lo borra); el resto queda
+     * como está en el servidor. Así un teléfono con datos viejos que solo reordena sus frecuentes o cambia el nombre no revierte un precio o un costo más
+     * nuevos (gana el último por campo). `baseRev` es informativo. Las mismas reglas y permisos que `upsert`.
+     */
+    @Transactional
+    public Result patch(MemberContext ctx, UUID id, tools.jackson.databind.JsonNode payload) {
+        ProductView cur = find(ctx.businessId(), id).orElseThrow(() -> ApiException.notFound("PRODUCT_NOT_FOUND", "Product not found"));
+        tools.jackson.databind.JsonNode set = payload == null ? null : payload.get("set");
+        if (set == null || !set.isObject()) throw ApiException.badRequest("INVALID_PATCH", "A patch needs the changed fields in `set`");
+        tools.jackson.databind.JsonNode base = mapper.valueToTree(cur);
+        tools.jackson.databind.node.ObjectNode merged = mapper.createObjectNode();
+        for (String f : PATCHABLE) {
+            tools.jackson.databind.JsonNode v = set.has(f) ? set.get(f) : base.get(f);
+            if (v != null) merged.set(f, v);
+        }
+        return upsert(ctx, id, mapper.treeToValue(merged, ProductInput.class));
+    }
+
+    /** Un cajero cambió el precio o el costo: el dueño quiere saberlo (el cambio ya queda en el historial; esto es el aviso). */
+    private void notifyPriceChanged(MemberContext ctx, UUID id, ProductView cur, ProductInput p) {
+        String member = ctx.memberId() == null ? "" : jdbc.sql("SELECT display_name FROM member WHERE id = :m").param("m", ctx.memberId()).query(String.class).optional().orElse("");
+        Map<String, Object> args = new LinkedHashMap<>();
+        args.put("productId", id.toString());
+        args.put("productName", p.name());
+        args.put("memberName", member);
+        if (cur.priceMinor() != p.priceMinor()) {
+            args.put("fromPriceMinor", cur.priceMinor());
+            args.put("toPriceMinor", p.priceMinor());
+        }
+        if (!java.util.Objects.equals(cur.costMinor(), p.costMinor())) {
+            if (cur.costMinor() != null) args.put("fromCostMinor", cur.costMinor());
+            if (p.costMinor() != null) args.put("toCostMinor", p.costMinor());
+            args.put("costChanged", true);
+        }
+        notifications.notify(ctx.businessId(), com.cuadra.api.notification.NotificationService.Type.PRICE_CHANGED, args, null, ctx.memberId(),
+                "PRICE_CHANGED:" + id + ":" + p.priceMinor() + ":" + p.costMinor() + ":" + java.time.Instant.now().getEpochSecond() / 60, "cuadra://inventario");
     }
 
     @Transactional

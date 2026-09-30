@@ -26,32 +26,6 @@ class ApiFiltersTest extends ApiTestBase {
     // ---------- invitaciones ----------
 
     @Test
-    void anInvitationForAnEmailCanOnlyBeAcceptedByThatAccount() throws Exception {
-        String owner = login("apfa");
-        UUID b = createBusiness(owner, "Inv correo");
-        String invitation = call(post(base(b) + "/invitations"), bearer(owner), "{\"role\":\"CASHIER\",\"email\":\"  Maria@Test.com \"}").andExpect(status().isCreated())
-                .andExpect(jsonPath("$.email", is("maria@test.com"))).andReturn().getResponse().getContentAsString();
-        String code = JsonPath.read(invitation, "$.code");
-        String stranger = login("apfb");
-        call(post("/api/invitations/" + code + "/accept"), bearer(stranger), null).andExpect(status().isForbidden()).andExpect(jsonPath("$.code", is("INVITATION_EMAIL_MISMATCH")));
-        // El rechazo no gasta la invitación: la cuenta correcta todavía puede entrar.
-        String maria = login("maria");
-        call(post("/api/invitations/" + code + "/accept"), bearer(maria), null).andExpect(status().isOk());
-        call(get(base(b) + "/invitations"), bearer(owner), null).andExpect(jsonPath("$", hasSize(0)));
-    }
-
-    @Test
-    void aBadEmailIsRejectedAndAnInvitationWithoutEmailStaysOpenToAnyone() throws Exception {
-        String owner = login("apfc");
-        UUID b = createBusiness(owner, "Inv abierta");
-        call(post(base(b) + "/invitations"), bearer(owner), "{\"role\":\"CASHIER\",\"email\":\"no-es-un-correo\"}").andExpect(status().isBadRequest()).andExpect(jsonPath("$.code", is("INVALID_EMAIL")));
-        String open = call(post(base(b) + "/invitations"), bearer(owner), "{\"role\":\"CASHIER\"}").andExpect(jsonPath("$.email", nullValue())).andReturn().getResponse().getContentAsString();
-        call(post("/api/invitations/" + JsonPath.read(open, "$.code") + "/accept"), bearer(login("apfd")), null).andExpect(status().isOk());
-    }
-
-    // ---------- teléfonos ----------
-
-    @Test
     void theDeviceListNamesTheCashRegisterOfEachPhone() throws Exception {
         String owner = login("apfe");
         UUID b = createBusiness(owner, "Teléfonos");

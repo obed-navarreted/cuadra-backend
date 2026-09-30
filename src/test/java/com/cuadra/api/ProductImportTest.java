@@ -85,6 +85,18 @@ class ProductImportTest extends ApiTestBase {
     }
 
     @Test
+    void thousandsSeparatorsAreReadByTheLastSeparatorNotAsDecimals() throws Exception {
+        String owner = login("impe");
+        UUID b = createBusiness(owner, "Imp E");
+        String body = rows(row(2, "Refri", null, "1,000.00", "1.250,50", null, null, null, null, null), row(3, "Cocina", null, "12.500", null, null, null, null, null, null));
+        call(post(url(b, false)), bearer(owner), body).andExpect(status().isOk()).andExpect(jsonPath("$.summary.created", is(2))).andExpect(jsonPath("$.summary.failed", is(0)));
+        var p = jdbc.sql("SELECT price_minor, cost_minor FROM product WHERE name = 'Refri' AND business_id = :b").param("b", b).query((rs, n) -> new long[] {rs.getLong(1), rs.getLong(2)}).single();
+        assertEquals(100000L, p[0]);   // mil, no uno
+        assertEquals(125050L, p[1]);
+        assertEquals(1250000L, jdbc.sql("SELECT price_minor FROM product WHERE name = 'Cocina' AND business_id = :b").param("b", b).query(Long.class).single());
+    }
+
+    @Test
     void aBadRowIsReportedAndSkippedWhileTheOthersAreApplied() throws Exception {
         String owner = login("impd");
         UUID b = createBusiness(owner, "Imp D");
@@ -93,7 +105,7 @@ class ProductImportTest extends ApiTestBase {
         String body = rows(
                 row(2, "Bueno", "1111", "10", null, null, null, null, null, null),
                 row(3, "Precio malo", null, "abc", null, null, null, null, null, null),
-                row(4, "Muchos decimales", null, "10.555", null, null, null, null, null, null),
+                row(4, "Muchos decimales", null, "10.5555", null, null, null, null, null, null),
                 row(5, "Unidad mala", null, "10", null, "GALON", null, null, null, null),
                 row(6, "", null, "10", null, null, null, null, null, null),
                 row(7, "Código repetido", "1111", "10", null, null, null, null, null, null),

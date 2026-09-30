@@ -21,7 +21,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * Detrás de un proxy, `trustForwardedFor` toma la ÚLTIMA dirección de `X-Forwarded-For` (la que añadió NUESTRO proxy; las anteriores las escribe el cliente).
  */
 public class RateLimitFilter extends OncePerRequestFilter {
-    public record Limits(int authPerMinute, int invitationPerMinute, int linkCreatePerMinute, int linkPollPerMinute, int credentialPerMinute) {}
+    public record Limits(int authPerMinute, int linkCreatePerMinute, int linkPollPerMinute, int credentialPerMinute) {}
 
     private final Clock clock;
     private final Limits limits;
@@ -41,9 +41,9 @@ public class RateLimitFilter extends OncePerRequestFilter {
         String method = request.getMethod();
         String bucket;
         int limit;
-        if (method.equals("POST") && path.equals("/api/auth/platform")) { bucket = "platform-login"; limit = Math.min(5, limits.authPerMinute()); }
+        if (method.equals("POST") && path.equals("/api/auth/member-login")) { bucket = "member-login"; limit = Math.min(10, limits.authPerMinute()); }
+        else if (method.equals("POST") && path.equals("/api/auth/platform")) { bucket = "platform-login"; limit = Math.min(5, limits.authPerMinute()); }
         else if (method.equals("POST") && path.equals("/api/auth/google")) { bucket = "auth"; limit = limits.authPerMinute(); }
-        else if (method.equals("GET") && path.startsWith("/api/invitations/")) { bucket = "invitation"; limit = limits.invitationPerMinute(); }
         else if (method.equals("POST") && path.equals("/api/devices/link-requests")) { bucket = "link-create"; limit = limits.linkCreatePerMinute(); }
         else if (method.equals("GET") && path.startsWith("/api/devices/link-requests/")) { bucket = "link-poll"; limit = limits.linkPollPerMinute(); }
         else if (request.getHeader("Authorization") != null) { bucket = "cred:" + request.getHeader("Authorization").hashCode(); limit = limits.credentialPerMinute(); }

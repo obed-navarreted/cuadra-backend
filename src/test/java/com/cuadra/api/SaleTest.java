@@ -31,6 +31,8 @@ class SaleTest extends ApiTestBase {
 
     private String url(UUID b, UUID sale) { return "/api/b/" + b + "/sales/" + sale; }
 
+    private static String tenMinutesAgo() { return "\"completedAt\":\"" + java.time.Instant.now().minusSeconds(600) + "\""; }
+
     @Test
     void mixedPaymentSaleComputesTotalsOnTheServerAndKeepsTheChange() throws Exception {
         String owner = login("sala");
@@ -102,7 +104,8 @@ class SaleTest extends ApiTestBase {
         String device = linkDevice(owner, b);
         UUID id = UUID.randomUUID();
         String it = item("Pan", 1000, 1000);
-        asDevice(put(url(b, id)), device, cashier, sale("COMPLETED", it, pay("CASH", 1000, ""), "")).andExpect(status().isCreated());
+        // Cobrada hace 10 minutos: ya pasó el rato en que el cajero puede anular su última venta.
+        asDevice(put(url(b, id)), device, cashier, sale("COMPLETED", it, pay("CASH", 1000, ""), tenMinutesAgo())).andExpect(status().isCreated());
 
         String edited = sale("COMPLETED", item("Pan", 1000, 2000), pay("CASH", 2000, ""), "");
         asDevice(put(url(b, id)), device, cashier, edited).andExpect(status().isForbidden());
@@ -253,8 +256,8 @@ class SaleTest extends ApiTestBase {
         UUID cashier = createPinMember(owner, b, "Kevin", "CASHIER");
         String device = linkDevice(owner, b);
         UUID id = UUID.randomUUID();
-        asDevice(put(url(b, id)), device, cashier, sale("COMPLETED", item("x", 1000, 1000), pay("CASH", 1000, ""), "")).andExpect(status().isCreated());
-        // El cajero no elimina una venta cobrada; sin motivo, nadie.
+        asDevice(put(url(b, id)), device, cashier, sale("COMPLETED", item("x", 1000, 1000), pay("CASH", 1000, ""), tenMinutesAgo())).andExpect(status().isCreated());
+        // Pasados los primeros minutos el cajero no elimina una venta cobrada; sin motivo, nadie.
         asDevice(post(url(b, id) + "/cancel"), device, cashier, "{\"reason\":\"me equivoqué\"}").andExpect(status().isForbidden());
         assertCode(call(post(url(b, id) + "/cancel"), bearer(owner), "{}").andExpect(status().isBadRequest()), "REASON_REQUIRED");
         assertCode(call(post(url(b, id) + "/cancel"), bearer(owner), "{\"reason\":\"no\"}").andExpect(status().isBadRequest()), "REASON_REQUIRED");

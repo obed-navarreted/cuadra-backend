@@ -110,17 +110,6 @@ class NotificationTest extends ApiTestBase {
     }
 
     @Test
-    void whoInvitedIsToldWhenTheInvitationIsAccepted() throws Exception {
-        String owner = login("ntfd");
-        UUID b = createBusiness(owner, "Ntf D");
-        joinAs(owner, b, "ntfd2", "CASHIER");
-        call(get(base(b) + "/notifications"), bearer(owner), null).andExpect(jsonPath("$.items[?(@.type=='MEMBER_JOINED')]", hasSize(1)))
-                .andExpect(jsonPath("$.items[?(@.type=='MEMBER_JOINED')].title", hasItem("Se unió alguien al equipo")));
-    }
-
-    // ---------- reglas de entrega ----------
-
-    @Test
     void aPersonCanSilenceATypeAndQuietHoursKeepNonCriticalAlertsInTheInboxOnly() throws Exception {
         String owner = login("ntfe");
         UUID b = createBusiness(owner, "Ntf E");
@@ -145,7 +134,10 @@ class NotificationTest extends ApiTestBase {
         String owner = login("ntff");
         UUID b = createBusiness(owner, "Ntf F");
         String admin = joinAs(owner, b, "ntff2", "ADMIN");
-        joinAs(owner, b, "ntff3", "CASHIER");
+        String cashier = joinAs(owner, b, "ntff3", "CASHIER");
+        UUID p = trackedProduct(owner, b, 3000, 5000);
+        sell(cashier, b, p, 3000);   // stock bajo
+        sell(cashier, b, p, 2000);   // agotado: dos avisos para el dueño
         call(get(base(b) + "/notifications/unread-count"), bearer(owner), null).andExpect(jsonPath("$.unread", is(2)));
         String json = call(get(base(b) + "/notifications"), bearer(owner), null).andReturn().getResponse().getContentAsString();
         String id = JsonPath.read(json, "$.items[0].id");
@@ -161,13 +153,16 @@ class NotificationTest extends ApiTestBase {
         String owner = login("ntfr");
         UUID b = createBusiness(owner, "Ntf R");
         String admin = joinAs(owner, b, "ntfr2", "ADMIN");
-        joinAs(owner, b, "ntfr3", "CASHIER");
+        String cashier = joinAs(owner, b, "ntfr3", "CASHIER");
+        UUID p = trackedProduct(owner, b, 3000, 5000);
+        sell(cashier, b, p, 3000);
+        sell(cashier, b, p, 2000);
         call(get(base(b) + "/notifications/unread-count"), bearer(owner), null).andExpect(jsonPath("$.unread", is(2)));
         call(post(base(b) + "/notifications/read-all"), bearer(owner), null).andExpect(status().isOk()).andExpect(jsonPath("$.marked", is(2)));
         call(get(base(b) + "/notifications/unread-count"), bearer(owner), null).andExpect(jsonPath("$.unread", is(0)));
         call(post(base(b) + "/notifications/read-all"), bearer(owner), null).andExpect(jsonPath("$.marked", is(0)));
-        // El admin tiene sus propios avisos (uno del cajero que se unió) y no se tocan.
-        call(get(base(b) + "/notifications/unread-count"), bearer(admin), null).andExpect(jsonPath("$.unread", is(0)));
+        // El admin tiene sus propios avisos (los mismos dos, suyos) y no se tocan.
+        call(get(base(b) + "/notifications/unread-count"), bearer(admin), null).andExpect(jsonPath("$.unread", is(2)));
     }
 
     @Test

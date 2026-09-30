@@ -45,13 +45,13 @@ class SecurityHardeningTest extends ApiTestBase {
     @Test
     void productionRefusesToStartWithDevelopmentValues() {
         CuadraProperties bad = new CuadraProperties(null, null, 12, new CuadraProperties.Google(List.of()), null, new CuadraProperties.Platform(List.of(), "", ""),
-                new CuadraProperties.App("http://localhost:5173", "0", "", "hidden"));
+                new CuadraProperties.App("http://localhost:5173", "0"));
         List<String> problems = com.cuadra.api.config.ProductionGuardProbe.problems(bad, "prod", "cuadra", false, false, List.of("http://localhost:5173"));
         assertEquals(7, problems.size(), problems.toString());
         // En desarrollo no molesta.
         assertTrue(com.cuadra.api.config.ProductionGuardProbe.problems(bad, "dev", "cuadra", false, false, List.of()).isEmpty());
         CuadraProperties good = new CuadraProperties(null, null, 12, new CuadraProperties.Google(List.of("id.apps.googleusercontent.com")), null,
-                new CuadraProperties.Platform(List.of(), "", ""), new CuadraProperties.App("https://app.cuadra.example", "0", "", "hidden"));
+                new CuadraProperties.Platform(List.of(), "", ""), new CuadraProperties.App("https://app.cuadra.example", "0"));
         assertTrue(com.cuadra.api.config.ProductionGuardProbe.problems(good, "prod", "una-clave-larga-y-unica", true, true, List.of("https://obed.github.io")).isEmpty());
     }
 }

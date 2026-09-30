@@ -9,8 +9,8 @@ public enum Role {
     OWNER(EnumSet.allOf(Permission.class)),
     /** Gestiona a TODAS las personas menos al dueño (cajeros y otros admins: crear, invitar, cambiar datos y PIN, dar de baja). */
     ADMIN(EnumSet.of(
-            Permission.VIEW_MEMBERS, Permission.MANAGE_CASHIERS, Permission.INVITE_CASHIER,
-            Permission.MANAGE_DEVICES, Permission.SELL, Permission.VIEW_REPORTS, Permission.MANAGE_CATALOG, Permission.MANAGE_ADMINS, Permission.INVITE_ADMIN,
+            Permission.VIEW_MEMBERS, Permission.MANAGE_CASHIERS,
+            Permission.MANAGE_DEVICES, Permission.SELL, Permission.VIEW_REPORTS, Permission.MANAGE_CATALOG, Permission.MANAGE_ADMINS,
             Permission.PROGRAM_NOTIFICATIONS, Permission.VIEW_SETTINGS, Permission.EDIT_PRODUCTS, Permission.EDIT_SALES, Permission.MANAGE_CREDIT, Permission.MANAGE_EXPENSES, Permission.MANAGE_STOCK)),
     CASHIER(EnumSet.of(Permission.VIEW_MEMBERS, Permission.SELL, Permission.VIEW_SETTINGS, Permission.EDIT_PRODUCTS));
 
@@ -32,8 +32,6 @@ public enum Role {
         MANAGE_CATALOG,
         MANAGE_CASHIERS,
         MANAGE_ADMINS,
-        INVITE_CASHIER,
-        INVITE_ADMIN,
         MANAGE_DEVICES,
         PROGRAM_NOTIFICATIONS,
         EDIT_BUSINESS,
@@ -41,6 +39,13 @@ public enum Role {
         DELETE_BUSINESS,
         TRANSFER_OWNERSHIP
     }
+
+    /** Jerarquía: dueño > admin > cajero (para comparar el poder de un teléfono con el de la persona que actúa). */
+    public int rank() {
+        return switch (this) { case OWNER -> 3; case ADMIN -> 2; case CASHIER -> 1; };
+    }
+
+    public boolean atMost(Role limit) { return rank() <= limit.rank(); }
 
     private final Set<Permission> permissions;
 

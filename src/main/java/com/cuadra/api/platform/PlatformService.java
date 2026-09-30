@@ -30,8 +30,8 @@ public class PlatformService {
     public static final Duration VIEW_AS_TTL = Duration.ofMinutes(30);
     /** Claves de la configuración remota que la consola puede editar, y cómo se valida cada una. */
     static final Map<String, Pattern> CONFIG_KEYS = Map.of(
-            "donation_url", Pattern.compile("https://\\S{4,300}"),
-            "donation_mode", Pattern.compile("[A-Za-z_]{2,30}"),
+            "support_whatsapp", Pattern.compile("\\d{8,15}"),
+            "support_email", Pattern.compile("[^@\\s]{1,100}@[^@\\s]{3,100}"),
             "min_app_version", Pattern.compile("\\d{1,4}(\\.\\d{1,4}){0,3}"),
             "recommended_app_version", Pattern.compile("\\d{1,4}(\\.\\d{1,4}){0,3}"));
     static final Set<String> FLAG_KEYS = Set.of("early_access", "extended_history", "beta_features");

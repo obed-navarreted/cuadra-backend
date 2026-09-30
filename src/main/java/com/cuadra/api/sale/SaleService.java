@@ -33,6 +33,12 @@ public class SaleService {
     private static final int MAX_ITEMS = 500;
     private static final int MAX_PAYMENTS = 6;
     private static final Duration CLOCK_SKEW = Duration.ofMinutes(5);
+    /** Un cajero puede anular su ÚLTIMA venta durante estos minutos (con motivo y aviso al dueño); después, solo dueño y admins. */
+    public static final Duration UNDO_WINDOW = Duration.ofMinutes(5);
+    /** Margen por segundos de red o de pantalla al comparar con la ventana. */
+    static final Duration UNDO_TOLERANCE = Duration.ofSeconds(30);
+    /** Una anulación hecha sin conexión dentro de la ventana puede llegar tarde, pero no días después. */
+    static final Duration UNDO_MAX_DELAY = Duration.ofHours(48);
 
     private final JdbcClient jdbc;
     private final Audit audit;
@@ -42,9 +48,11 @@ public class SaleService {
     private final com.cuadra.api.cash.RegisterResolver registers;
     private final com.cuadra.api.stock.StockService stock;
     private final com.cuadra.api.notification.NotificationService notifications;
+    private final ReturnService returns;
 
     public SaleService(JdbcClient jdbc, Audit audit, Clock clock, BusinessDayService days, CreditService credits, com.cuadra.api.cash.RegisterResolver registers,
-                       com.cuadra.api.stock.StockService stock, com.cuadra.api.notification.NotificationService notifications) {
+                       com.cuadra.api.stock.StockService stock, com.cuadra.api.notification.NotificationService notifications, ReturnService returns) {
+        this.returns = returns;
         this.jdbc = jdbc;
         this.audit = audit;
         this.clock = clock;
@@ -63,11 +71,21 @@ public class SaleService {
     public record PaymentInput(UUID id, String method, String otherLabel, Long amountMinor, Long tenderedMinor, String reference,
                                String debtorLabel, String debtorPhone, UUID customerId) {}
 
+    /**
+     * `fromStatus`: el estado que tenía la venta en el teléfono antes de este cambio. "PARKED" al cobrar una cuenta apartada retomada: si en el servidor
+     * esa cuenta ya se cobró (distinta) o se descartó en otro teléfono, esta venta NO se descarta ni pisa la otra: se guarda aparte para revisar.
+     */
     public record SaleInput(String status, String label, UUID cashRegisterId, Long discountMinor, Instant createdAt,
-                            Instant completedAt, List<ItemInput> items, List<PaymentInput> payments) {}
+                            Instant completedAt, List<ItemInput> items, List<PaymentInput> payments, String fromStatus) {
+        public SaleInput(String status, String label, UUID cashRegisterId, Long discountMinor, Instant createdAt, Instant completedAt, List<ItemInput> items,
+                         List<PaymentInput> payments) {
+            this(status, label, cashRegisterId, discountMinor, createdAt, completedAt, items, payments, null);
+        }
+    }
 
+    /** `returnedMilli`: cuánto de esta línea ya se devolvió (se puede devolver hasta `quantityMilli − returnedMilli`). */
     public record ItemView(UUID id, UUID productId, String barcode, String name, String variant, long unitPriceMinor,
-                           Long unitCostMinor, long quantityMilli, long discountMinor, long lineTotalMinor) {}
+                           Long unitCostMinor, long quantityMilli, long discountMinor, long lineTotalMinor, long returnedMilli) {}
 
     public record PaymentView(UUID id, String method, String otherLabel, long amountMinor, Long tenderedMinor, Long changeMinor, String reference,
                               String debtorLabel, String debtorPhone, UUID customerId) {}
@@ -78,9 +96,16 @@ public class SaleService {
                            long subtotalMinor, long discountMinor, long totalMinor, MemberRef createdBy, MemberRef completedBy,
                            Instant completedAt, MemberRef editedBy, Instant editedAt, MemberRef cancelledBy, Instant cancelledAt,
                            String cancelReason, UUID lockedByDeviceId, Instant lockedUntil, Instant createdAt, Instant updatedAt,
-                           long rev, List<ItemView> items, List<PaymentView> payments) {}
+                           long rev, List<ItemView> items, List<PaymentView> payments,
+                           /** Venta guardada aparte porque chocó con otra versión de `conflictOfSaleId` (cobrada o descartada en otro teléfono): revisar. */
+                           UUID conflictOfSaleId,
+                           /** Para revisar: LATE_AFTER_DISABLE (llegó después de la baja de quien la hizo) o CLOCK_ADJUSTED (el teléfono tenía la hora imposible). */
+                           String reviewFlag,
+                           /** Lo devuelto de esta venta (cada devolución cuenta en la jornada en que se hizo) y su suma. */
+                           long returnedMinor, List<ReturnService.ReturnView> returns) {}
 
-    public enum Outcome { CREATED, UPDATED, UNCHANGED, STALE }
+    /** CONFLICT_COPY: la versión que llegó chocó con otra ya cobrada o descartada y se guardó como venta NUEVA (`sale()` es esa copia). */
+    public enum Outcome { CREATED, UPDATED, UNCHANGED, STALE, CONFLICT_COPY }
 
     public record Result(SaleView sale, Outcome outcome) {}
 
@@ -200,6 +225,12 @@ public class SaleService {
 
     @Transactional
     public Result upsert(MemberContext ctx, UUID id, SaleInput in) {
+        return upsert(ctx, id, in, null);
+    }
+
+    /** `opId`: la operación de sincronización que trae este cambio; da el id (determinista) de la copia si hay conflicto. */
+    @Transactional
+    public Result upsert(MemberContext ctx, UUID id, SaleInput in, UUID opId) {
         Instant now = clock.instant();
         Norm n = normalize(in, now, ctx.businessId());
         // Al editar una venta sin indicar caja se conserva la suya (quien edita puede no tener teléfono ni ser de esa caja).
@@ -219,33 +250,27 @@ public class SaleService {
             if (jdbc.sql("SELECT count(*) FROM sale WHERE id = :id").param("id", id).query(Integer.class).single() > 0) {
                 throw ApiException.conflict("ID_TAKEN", "Id already in use");
             }
-            UUID day = n.completedAt == null ? null : days.idFor(ctx.businessId(), n.completedAt);
-            jdbc.sql("""
-                            INSERT INTO sale (id, business_id, cash_register_id, device_id, business_day_id, status, label, subtotal_minor, discount_minor,
-                                              total_minor, created_by_member_id, completed_by_member_id, completed_at, content_hash, created_at, updated_at)
-                            VALUES (:id, :b, :reg, :dev, :day, :st, :label, :sub, :disc, :tot, :by, :cby, :cat, :hash, :created, :now)
-                            """)
-                    .param("id", id).param("b", ctx.businessId()).param("reg", n.register, java.sql.Types.OTHER).param("dev", ctx.deviceId(), java.sql.Types.OTHER)
-                    .param("day", day, java.sql.Types.OTHER).param("st", n.status).param("label", n.label).param("sub", n.subtotal).param("disc", n.discount)
-                    .param("tot", n.total).param("by", ctx.memberId()).param("cby", "COMPLETED".equals(n.status) ? ctx.memberId() : null, java.sql.Types.OTHER)
-                    .param("cat", n.completedAt == null ? null : Timestamp.from(n.completedAt), java.sql.Types.TIMESTAMP)
-                    .param("hash", hash).param("created", Timestamp.from(n.createdAt)).param("now", Timestamp.from(now)).update();
-            replaceChildren(ctx.businessId(), id, n);
-            stock.reconcileSale(ctx, id);
-            if ("COMPLETED".equals(n.status)) {
-                credits.syncSaleCredits(ctx, id, saleCredits(n), n.completedAt);
-                audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "sale.complete", "sale", id, "total=" + n.total);
-            }
+            insertNew(ctx, id, n, hash, now, null);
             return new Result(view(ctx.businessId(), id), Outcome.CREATED);
         }
 
         // Una venta cancelada no revive y una cobrada no retrocede: la versión vieja de otro teléfono se ignora.
-        if ("CANCELLED".equals(row.status)) return new Result(view(ctx.businessId(), id), Outcome.STALE);
+        // EXCEPCIÓN, "un pago recibido nunca se pierde": una venta COBRADA distinta que llega sobre una descartada (la cuenta apartada se cobró sin conexión
+        // después de que otro teléfono la descartó) se guarda como venta nueva, marcada para revisión.
+        if ("CANCELLED".equals(row.status)) {
+            if ("COMPLETED".equals(n.status) && !hash.equals(row.hash) && (opId != null || "PARKED".equals(in.fromStatus()))) return conflictCopy(ctx, id, n, opId, now);
+            return new Result(view(ctx.businessId(), id), Outcome.STALE);
+        }
         if (hash.equals(row.hash)) return new Result(view(ctx.businessId(), id), Outcome.UNCHANGED);
 
         if ("COMPLETED".equals(row.status)) {
             if (!"COMPLETED".equals(n.status)) return new Result(view(ctx.businessId(), id), Outcome.STALE);
+            // La misma cuenta apartada cobrada en dos teléfonos sin conexión: la segunda no pisa las líneas y pagos de la primera (ni se rechaza, si la
+            // cobró un cajero): se guarda aparte para revisar. Solo quien puede editar ventas y edita a propósito (sin `fromStatus`) la modifica.
+            // (Por la cola, un cajero sin `fromStatus` —versión vieja de la app— tampoco puede editar: también se guarda aparte en vez de perderse.)
+            if ("PARKED".equals(in.fromStatus()) || (opId != null && !ctx.role().can(Permission.EDIT_SALES))) return conflictCopy(ctx, id, n, opId, now);
             ctx.require(Permission.EDIT_SALES);
+            if (returns.hasReturns(id)) throw ApiException.conflict("SALE_HAS_RETURNS", "This sale has returns: it can no longer be edited");
             long previousTotal = jdbc.sql("SELECT total_minor FROM sale WHERE id = :id").param("id", id).query(Long.class).single();
             jdbc.sql("""
                             UPDATE sale SET label = :label, cash_register_id = :reg, subtotal_minor = :sub, discount_minor = :disc, total_minor = :tot,
@@ -288,6 +313,51 @@ public class SaleService {
         return new Result(view(ctx.businessId(), id), Outcome.UPDATED);
     }
 
+    private void insertNew(MemberContext ctx, UUID id, Norm n, String hash, Instant now, UUID conflictOf) {
+        UUID day = n.completedAt == null ? null : days.idFor(ctx.businessId(), n.completedAt);
+        jdbc.sql("""
+                        INSERT INTO sale (id, business_id, cash_register_id, device_id, business_day_id, status, label, subtotal_minor, discount_minor,
+                                          total_minor, created_by_member_id, completed_by_member_id, completed_at, content_hash, created_at, updated_at, conflict_of_sale_id)
+                        VALUES (:id, :b, :reg, :dev, :day, :st, :label, :sub, :disc, :tot, :by, :cby, :cat, :hash, :created, :now, :conflict)
+                        """)
+                .param("id", id).param("b", ctx.businessId()).param("reg", n.register, java.sql.Types.OTHER).param("dev", ctx.deviceId(), java.sql.Types.OTHER)
+                .param("day", day, java.sql.Types.OTHER).param("st", n.status).param("label", n.label).param("sub", n.subtotal).param("disc", n.discount)
+                .param("tot", n.total).param("by", ctx.memberId()).param("cby", "COMPLETED".equals(n.status) ? ctx.memberId() : null, java.sql.Types.OTHER)
+                .param("cat", n.completedAt == null ? null : Timestamp.from(n.completedAt), java.sql.Types.TIMESTAMP)
+                .param("hash", hash).param("created", Timestamp.from(n.createdAt)).param("now", Timestamp.from(now)).param("conflict", conflictOf, java.sql.Types.OTHER).update();
+        replaceChildren(ctx.businessId(), id, n);
+        stock.reconcileSale(ctx, id);
+        if ("COMPLETED".equals(n.status)) {
+            credits.syncSaleCredits(ctx, id, saleCredits(n), n.completedAt);
+            audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "sale.complete", "sale", id, "total=" + n.total);
+        }
+    }
+
+    /**
+     * La venta cobrada que chocó con otra versión se guarda como una venta NUEVA (id derivado de la operación: repetirla no la duplica), con sus líneas y
+     * pagos con ids nuevos, marcada `conflict_of_sale_id` y con aviso al dueño. Así el dinero cobrado queda en los libros y alguien decide si era un duplicado.
+     */
+    private Result conflictCopy(MemberContext ctx, UUID originalId, Norm n, UUID opId, Instant now) {
+        ctx.require(Permission.SELL);
+        UUID copyId = UUID.nameUUIDFromBytes(("sale-conflict:" + (opId != null ? opId : originalId + ":" + hash(n))).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        if (jdbc.sql("SELECT count(*) FROM sale WHERE id = :id AND business_id = :b").param("id", copyId).param("b", ctx.businessId()).query(Integer.class).single() > 0) {
+            return new Result(view(ctx.businessId(), copyId), Outcome.CONFLICT_COPY);
+        }
+        java.util.function.Function<UUID, UUID> derive = old -> UUID.nameUUIDFromBytes((copyId + ":" + old).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        List<NItem> items = n.items.stream().map(i -> new NItem(new ItemInput(derive.apply(i.in.id()), i.in.productId(), i.in.barcode(), i.in.name(), i.in.variant(),
+                i.in.unitPriceMinor(), i.in.unitCostMinor(), i.in.quantityMilli(), i.in.discountMinor()), i.name, i.price, i.qty, i.discount, i.lineTotal)).toList();
+        List<NPayment> pays = n.payments.stream().map(p -> new NPayment(derive.apply(p.id), p.method, p.otherLabel, p.amount, p.tendered, p.change, p.reference,
+                p.debtorLabel, p.debtorPhone, p.customerId)).toList();
+        Norm copy = new Norm(n.status, n.label, n.register, n.discount, items, pays, n.subtotal, n.total, n.createdAt, n.completedAt);
+        insertNew(ctx, copyId, copy, hash(copy), now, originalId);
+        audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "sale.conflict_copy", "sale", copyId, "of=" + originalId + " total=" + n.total);
+        String member = ctx.memberId() == null ? "" : jdbc.sql("SELECT display_name FROM member WHERE id = :m").param("m", ctx.memberId()).query(String.class).optional().orElse("");
+        notifications.notify(ctx.businessId(), com.cuadra.api.notification.NotificationService.Type.SALE_CONFLICT,
+                java.util.Map.of("saleId", copyId.toString(), "originalSaleId", originalId.toString(), "memberName", member, "totalMinor", n.total),
+                null, null, "SALE_CONFLICT:" + copyId, "cuadra://ventas");
+        return new Result(view(ctx.businessId(), copyId), Outcome.CONFLICT_COPY);
+    }
+
     private java.util.List<CreditService.SaleCredit> saleCredits(Norm n) {
         return n.payments.stream().filter(p -> "CREDIT".equals(p.method))
                 .map(p -> new CreditService.SaleCredit(p.id, p.amount, p.debtorLabel, p.debtorPhone, p.customerId)).toList();
@@ -328,36 +398,100 @@ public class SaleService {
         }
     }
 
-    @Transactional
     public SaleView cancel(MemberContext ctx, UUID id, String reason) {
-        String status = jdbc.sql("SELECT status FROM sale WHERE id = :id AND business_id = :b FOR UPDATE").param("id", id).param("b", ctx.businessId())
-                .query(String.class).optional().orElseThrow(() -> ApiException.notFound("SALE_NOT_FOUND", "Sale not found"));
+        return cancel(ctx, id, reason, null);
+    }
+
+    /**
+     * Descartar una cuenta apartada (cualquiera que venda) o eliminar/anular una venta cobrada.
+     * - Dueño y admins eliminan cualquier venta cobrada, con motivo.
+     * - Un cajero solo puede ANULAR SU ÚLTIMA venta y dentro de los primeros {@link #UNDO_WINDOW} (ver `requireUndo`), con motivo; el dueño recibe aviso.
+     * `requestedAt`: la hora del teléfono al pedirlo (por la cola, sin conexión); la anulación cuenta en ESA jornada (acotada entre el cobro y ahora).
+     */
+    @Transactional
+    public SaleView cancel(MemberContext ctx, UUID id, String reason, Instant requestedAt) {
+        var row = jdbc.sql("SELECT status, completed_at, completed_by_member_id, device_id FROM sale WHERE id = :id AND business_id = :b FOR UPDATE").param("id", id).param("b", ctx.businessId())
+                .query((rs, n) -> new Object[] {rs.getString(1), rs.getTimestamp(2), rs.getObject(3, UUID.class), rs.getObject(4, UUID.class)})
+                .optional().orElseThrow(() -> ApiException.notFound("SALE_NOT_FOUND", "Sale not found"));
+        String status = (String) row[0];
         if ("CANCELLED".equals(status)) return view(ctx.businessId(), id);
-        // Descartar una cuenta apartada lo hace cualquiera que venda; eliminar una venta cobrada, quien puede editarlas.
-        ctx.require("COMPLETED".equals(status) ? Permission.EDIT_SALES : Permission.SELL);
+        boolean completed = "COMPLETED".equals(status);
+        Instant now = clock.instant();
+        Instant completedAt = row[1] == null ? null : ((Timestamp) row[1]).toInstant();
+        boolean undo = false;
+        if (completed) {
+            // Eliminar una venta cobrada exige quien puede editarlas, o que sea la anulación de la última venta del cajero en sus primeros minutos.
+            if (!ctx.role().can(Permission.EDIT_SALES)) {
+                ctx.require(Permission.SELL);
+                requireUndo(ctx, id, completedAt, (UUID) row[2], (UUID) row[3], requestedAt, now);
+                undo = true;
+            }
+        } else {
+            // Descartar una cuenta apartada lo hace cualquiera que venda.
+            ctx.require(Permission.SELL);
+        }
         // Eliminar una venta cobrada exige un MOTIVO (queda con quién y cuándo, y la venta se conserva como anulada): sin motivo no hay trazabilidad.
-        if ("COMPLETED".equals(status) && (reason == null || reason.trim().length() < 5)) {
+        if (completed && (reason == null || reason.trim().length() < 5)) {
             throw ApiException.badRequest("REASON_REQUIRED", "A reason of at least 5 characters is required to delete a paid sale");
         }
-        if ("COMPLETED".equals(status)) credits.cancelSaleCredits(ctx, id);
+        if (completed && returns.hasReturns(id)) throw ApiException.conflict("SALE_HAS_RETURNS", "This sale has returns: return the rest instead of deleting it");
+        if (completed) credits.cancelSaleCredits(ctx, id);
+        // La anulación cuenta en la jornada en que se HIZO: la hora del teléfono (sin conexión) acotada entre el cobro y ahora.
+        Instant at = now;
+        if (completed && requestedAt != null && completedAt != null) at = requestedAt.isAfter(now) ? now : requestedAt.isBefore(completedAt) ? completedAt : requestedAt;
         jdbc.sql("""
-                        UPDATE sale SET status = 'CANCELLED', cancelled_by_member_id = :m, cancelled_at = :now, cancel_reason = :r, locked_by_device_id = NULL,
+                        UPDATE sale SET status = 'CANCELLED', cancelled_by_member_id = :m, cancelled_at = :at, cancel_reason = :r, locked_by_device_id = NULL,
                                locked_until = NULL, updated_at = :now, rev = nextval('change_rev_seq') WHERE id = :id AND business_id = :b
                         """)
-                .param("m", ctx.memberId()).param("now", Timestamp.from(clock.instant())).param("r", reason == null || reason.isBlank() ? null : reason.trim())
+                .param("m", ctx.memberId()).param("at", Timestamp.from(at)).param("now", Timestamp.from(now)).param("r", reason == null || reason.isBlank() ? null : reason.trim())
                 .param("id", id).param("b", ctx.businessId()).update();
         stock.reconcileSale(ctx, id);
-        if ("COMPLETED".equals(status)) notifySaleDeleted(ctx, id);
-        audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "sale.cancel", "sale", id, status + (reason == null ? "" : ": " + reason));
+        if (completed) notifySaleDeleted(ctx, id, undo, reason == null ? "" : reason.trim());
+        audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), undo ? "sale.undo" : "sale.cancel", "sale", id, status + (reason == null ? "" : ": " + reason));
         return view(ctx.businessId(), id);
     }
 
+    /**
+     * "Anular mi última venta" (cajero). Se permite solo si:
+     * 1. la cobró esa misma persona;
+     * 2. es su venta cobrada MÁS RECIENTE (no hay otra suya cobrada después);
+     * 3. no han pasado más de {@link #UNDO_WINDOW} (+ {@link #UNDO_TOLERANCE}) desde el cobro. El tiempo se mide así:
+     *    - si la anulación llega por la cola desde el MISMO teléfono que cobró (`requestedAt` = hora del teléfono al pedirla), con ese reloj: cobro y
+     *      anulación salen del mismo reloj, así que un reloj adelantado o atrasado no cambia la diferencia. Esa anulación puede llegar tarde (sin conexión),
+     *      pero no más de {@link #UNDO_MAX_DELAY} después del cobro ni con una hora futura;
+     *    - si no (otro teléfono, sin hora del teléfono), con la hora del servidor al recibirla.
+     * Pasado eso, solo dueño y admins eliminan (flujo de siempre).
+     */
+    private void requireUndo(MemberContext ctx, UUID id, Instant completedAt, UUID completedBy, UUID saleDevice, Instant requestedAt, Instant now) {
+        if (completedAt == null || ctx.memberId() == null || !ctx.memberId().equals(completedBy)) throw undoRefused("NOT_OWN");
+        UUID latest = jdbc.sql("""
+                        SELECT id FROM sale WHERE business_id = :b AND completed_by_member_id = :m AND status = 'COMPLETED' ORDER BY completed_at DESC, created_at DESC, id DESC LIMIT 1
+                        """).param("b", ctx.businessId()).param("m", ctx.memberId()).query(UUID.class).optional().orElse(null);
+        if (!id.equals(latest)) throw undoRefused("NOT_LATEST");
+        boolean samePhoneClock = requestedAt != null && ctx.deviceId() != null && ctx.deviceId().equals(saleDevice);
+        Instant ref;
+        if (samePhoneClock) {
+            if (requestedAt.isAfter(now.plus(CLOCK_SKEW)) || now.isAfter(completedAt.plus(UNDO_MAX_DELAY))) throw undoRefused("TOO_LATE");
+            ref = requestedAt;
+        } else {
+            ref = now;
+        }
+        Duration elapsed = Duration.between(completedAt, ref);
+        if (elapsed.compareTo(UNDO_WINDOW.plus(UNDO_TOLERANCE)) > 0) throw undoRefused("TOO_LATE");
+    }
+
+    private static ApiException undoRefused(String why) {
+        return ApiException.forbidden("UNDO_NOT_ALLOWED", "Only your last sale, within " + UNDO_WINDOW.toMinutes() + " minutes; after that ask the owner or an admin")
+                .with("reason", why).with("windowMinutes", UNDO_WINDOW.toMinutes());
+    }
+
     /** Eliminar una venta ya cobrada es de las cosas que el dueño quiere saber; si la borró él mismo, no hace falta avisarle. */
-    private void notifySaleDeleted(MemberContext ctx, UUID saleId) {
+    private void notifySaleDeleted(MemberContext ctx, UUID saleId, boolean undo, String reason) {
         long total = jdbc.sql("SELECT total_minor FROM sale WHERE id = :id").param("id", saleId).query(Long.class).single();
         String member = jdbc.sql("SELECT display_name FROM member WHERE id = :m").param("m", ctx.memberId()).query(String.class).single();
-        notifications.notify(ctx.businessId(), com.cuadra.api.notification.NotificationService.Type.SALE_DELETED, java.util.Map.of("saleId", saleId.toString(), "memberName", member, "totalMinor", total),
-                null, ctx.memberId(), "SALE_DELETED:" + saleId, "cuadra://notificaciones");
+        var type = undo ? com.cuadra.api.notification.NotificationService.Type.SALE_UNDONE : com.cuadra.api.notification.NotificationService.Type.SALE_DELETED;
+        notifications.notify(ctx.businessId(), type, java.util.Map.of("saleId", saleId.toString(), "memberName", member, "totalMinor", total, "reason", reason),
+                null, ctx.memberId(), type.name() + ":" + saleId, "cuadra://notificaciones");
     }
 
     @Transactional
@@ -466,7 +600,7 @@ public class SaleService {
         String mine = own ? " AND s.completed_by_member_id = :me" : "";
         var byMethodQ = jdbc.sql("""
                         SELECT p.method, sum(p.amount_minor) AS total FROM sale_payment p JOIN sale s ON s.id = p.sale_id
-                         WHERE s.business_id = :b AND s.status = 'COMPLETED' AND s.completed_at >= :s AND s.completed_at < :e""" + mine + " GROUP BY p.method")
+                         WHERE s.business_id = :b AND """ + " " + com.cuadra.api.report.ReportService.KEPT_SALE + " AND s.completed_at >= :s AND s.completed_at < :e" + mine + " GROUP BY p.method")
                 .param("b", ctx.businessId()).param("s", start).param("e", end);
         if (own) byMethodQ = byMethodQ.param("me", ctx.memberId());
         Map<String, Long> byMethod = new LinkedHashMap<>();
@@ -476,8 +610,8 @@ public class SaleService {
             return null;
         }).list();
         var totalsQ = jdbc.sql("""
-                        SELECT count(*) FILTER (WHERE s.status = 'COMPLETED') AS n, coalesce(sum(s.total_minor) FILTER (WHERE s.status = 'COMPLETED'), 0) AS total
-                          FROM sale s WHERE s.business_id = :b AND s.completed_at >= :s AND s.completed_at < :e""" + mine)
+                        SELECT count(*) AS n, coalesce(sum(s.total_minor), 0) AS total
+                          FROM sale s WHERE s.business_id = :b AND """ + " " + com.cuadra.api.report.ReportService.KEPT_SALE + " AND s.completed_at >= :s AND s.completed_at < :e" + mine)
                 .param("b", ctx.businessId()).param("s", start).param("e", end);
         if (own) totalsQ = totalsQ.param("me", ctx.memberId());
         long[] totals = totalsQ.query((rs, i) -> new long[] {rs.getLong("n"), rs.getLong("total")}).single();
@@ -505,10 +639,14 @@ public class SaleService {
                 ref(rs, "created_by_member_id", "created_name"), ref(rs, "completed_by_member_id", "completed_name"), instant(rs, "completed_at"),
                 ref(rs, "edited_by_member_id", "edited_name"), instant(rs, "edited_at"), ref(rs, "cancelled_by_member_id", "cancelled_name"),
                 instant(rs, "cancelled_at"), rs.getString("cancel_reason"), rs.getObject("locked_by_device_id", UUID.class), instant(rs, "locked_until"),
-                instant(rs, "created_at"), instant(rs, "updated_at"), rs.getLong("rev"), List.of(), List.of())).list();
+                instant(rs, "created_at"), instant(rs, "updated_at"), rs.getLong("rev"), List.of(), List.of(), rs.getObject("conflict_of_sale_id", UUID.class),
+                rs.getString("review_flag"), 0, List.of())).list();
         if (heads.isEmpty()) return heads;
 
         List<UUID> ids = heads.stream().map(SaleView::id).toList();
+        Map<UUID, List<ReturnService.ReturnView>> saleReturns = returns.forSales(businessId, ids);
+        Map<UUID, Long> returnedByItem = new java.util.HashMap<>();
+        saleReturns.values().forEach(list -> list.forEach(r -> r.items().forEach(i -> returnedByItem.merge(i.saleItemId(), i.quantityMilli(), Long::sum))));
         Map<UUID, List<ItemView>> items = new LinkedHashMap<>();
         jdbc.sql("SELECT * FROM sale_item WHERE sale_id IN (:ids) ORDER BY sale_id, position").param("ids", ids).query((rs, i) -> {
             long qty = rs.getLong("quantity_milli");
@@ -516,7 +654,7 @@ public class SaleService {
             long disc = rs.getLong("discount_minor");
             items.computeIfAbsent(rs.getObject("sale_id", UUID.class), k -> new ArrayList<>()).add(new ItemView(rs.getObject("id", UUID.class),
                     rs.getObject("product_id", UUID.class), rs.getString("barcode"), rs.getString("name"), rs.getString("variant"), price,
-                    (Long) rs.getObject("unit_cost_minor"), qty, disc, SaleMath.lineTotal(price, qty, disc)));
+                    (Long) rs.getObject("unit_cost_minor"), qty, disc, SaleMath.lineTotal(price, qty, disc), returnedByItem.getOrDefault(rs.getObject("id", UUID.class), 0L)));
             return null;
         }).list();
         Map<UUID, List<PaymentView>> pays = new LinkedHashMap<>();
@@ -530,7 +668,8 @@ public class SaleService {
         return heads.stream().map(h -> new SaleView(h.id(), h.status(), h.label(), h.cashRegisterId(), h.deviceId(), h.businessDayId(), h.subtotalMinor(),
                 h.discountMinor(), h.totalMinor(), h.createdBy(), h.completedBy(), h.completedAt(), h.editedBy(), h.editedAt(), h.cancelledBy(),
                 h.cancelledAt(), h.cancelReason(), h.lockedByDeviceId(), h.lockedUntil(), h.createdAt(), h.updatedAt(), h.rev(),
-                items.getOrDefault(h.id(), List.of()), pays.getOrDefault(h.id(), List.of()))).collect(Collectors.toList());
+                items.getOrDefault(h.id(), List.of()), pays.getOrDefault(h.id(), List.of()), h.conflictOfSaleId(), h.reviewFlag(),
+                saleReturns.getOrDefault(h.id(), List.of()).stream().mapToLong(ReturnService.ReturnView::totalMinor).sum(), saleReturns.getOrDefault(h.id(), List.of()))).collect(Collectors.toList());
     }
 
     private static MemberRef ref(java.sql.ResultSet rs, String idCol, String nameCol) throws java.sql.SQLException {

@@ -50,7 +50,12 @@ public class ReportService {
 
     public record Range(LocalDate from, LocalDate to, Timestamp start, Timestamp end, ZoneId zone, String cutoff, int decimals, String currency, String locale) {}
 
-    public record Sales(long count, long totalMinor, long discountMinor, long averageTicketMinor, long cancelledCount) {}
+    /**
+     * Ventas del periodo. `totalMinor`: lo cobrado en el periodo (una venta anulada en OTRA jornada sigue contando en la suya). Aparte, lo que se restó en el
+     * periodo: devoluciones hechas en él y ventas de jornadas anteriores anuladas en él. `netMinor` = total − devoluciones − anuladas de días anteriores.
+     */
+    public record Sales(long count, long totalMinor, long discountMinor, long averageTicketMinor, long cancelledCount,
+                        long returnsCount, long returnsMinor, long priorCancelledCount, long priorCancelledMinor, long netMinor) {}
 
     public record MethodAmount(String method, long amountMinor) {}
 
@@ -89,9 +94,26 @@ public class ReportService {
      */
     public record DayClose(LocalDate date, java.time.Instant startsAt, java.time.Instant endsAt, long salesCount, long salesMinor, List<MethodAmount> byMethod,
                            List<MethodAmount> creditCollected, long drawerExpensesMinor, long otherExpensesMinor, long withdrawalsMinor, long depositsMinor,
-                           long expectedCashMinor, long cancelledCount, long cancelledMinor) {}
+                           long expectedCashMinor,
+                           /** Ventas cobradas y anuladas en ESTA misma jornada (no están en las ventas del día). */
+                           long cancelledCount, long cancelledMinor,
+                           /** Devoluciones hechas en esta jornada (de ventas de cualquier día), por medio en que se devolvió el dinero, y lo que salió del cajón. */
+                           long returnsCount, long returnsMinor, List<MethodAmount> refundsByMethod, long cashRefundsMinor,
+                           /** Ventas de jornadas ANTERIORES anuladas en esta: siguen en su día y aquí restan (lo cobrado en efectivo sale del esperado). */
+                           long priorCancelledCount, long priorCancelledMinor, long priorCancelledCashMinor,
+                           /** Ventas del día − devoluciones − ventas anuladas de días anteriores. */
+                           long netSalesMinor,
+                           /** Gastos, abonos, retiros y entradas de días ANTERIORES anulados en esta jornada: su efecto en el efectivo esperado va aquí. */
+                           List<LaterVoid> laterVoids) {}
 
-    public record DailyClose(Range range, List<DayClose> days) {}
+    /** kind: EXPENSE_DRAWER | EXPENSE_OTHER | CREDIT_PAYMENT | WITHDRAWAL | DEPOSIT. `cashEffectMinor`: cuánto cambia el efectivo esperado (con signo). */
+    public record LaterVoid(String kind, long count, long amountMinor, long cashEffectMinor) {}
+
+    /** Un teléfono del negocio con operaciones sin enviar, o que no se ha sincronizado en más de una hora (con actividad en la última semana). */
+    public record DeviceSync(UUID deviceId, String name, int pendingOps, java.time.Instant lastSyncAt, boolean stale) {}
+
+    /** `syncWarnings`: el cierre puede estar incompleto mientras un teléfono no termine de enviar (se muestra un aviso). */
+    public record DailyClose(Range range, List<DayClose> days, List<DeviceSync> syncWarnings) {}
 
     public record Overview(Range range, Sales sales, List<MethodAmount> byMethod, Profit profit, long receivableMinor, List<DayPoint> series, List<Product> topProducts, long lowStockCount, MemberClosings lastClosing) {}
 
@@ -110,7 +132,29 @@ public class ReportService {
         return new Range(f, t, Timestamp.from(info.startOf(f)), Timestamp.from(info.endOf(t)), info.zone(), info.cutoff().toString(), decimals, b[0], b[1]);
     }
 
-    private static final String SALE_IN_RANGE = "s.business_id = :b AND s.status = 'COMPLETED' AND s.completed_at >= :s AND s.completed_at < :e";
+    /**
+     * Los días cerrados no cambian (docs/adr/0013): una venta cuenta en la jornada de su cobro aunque después se anule en OTRA jornada (esa anulación resta en
+     * su propio día); anulada dentro de la misma jornada, simplemente no cuenta.
+     */
+    public static final String KEPT_SALE = "s.completed_at IS NOT NULL AND (s.status = 'COMPLETED' OR (s.status = 'CANCELLED' AND business_date(:b, s.cancelled_at) <> business_date(:b, s.completed_at)))";
+    private static final String SALE_IN_RANGE = "s.business_id = :b AND " + KEPT_SALE + " AND s.completed_at >= :s AND s.completed_at < :e";
+    /** Ventas de jornadas anteriores anuladas en el rango (por la hora de la anulación). */
+    private static final String PRIOR_CANCEL_IN_RANGE = "s.business_id = :b AND s.status = 'CANCELLED' AND s.completed_at IS NOT NULL AND s.cancelled_at >= :s AND s.cancelled_at < :e "
+            + "AND business_date(:b, s.cancelled_at) <> business_date(:b, s.completed_at)";
+    private static final String RETURN_IN_RANGE = "r.business_id = :b AND r.occurred_at >= :s AND r.occurred_at < :e";
+
+    /**
+     * Libro de gastos del rango: cada gasto en su día (aunque se anule en OTRO día) y, en el día de esa anulación tardía, el mismo monto en negativo.
+     * Columnas de `expense` más `at` (hora que decide la jornada) y `signed` (monto con signo).
+     */
+    private static String ledger(String table, String alias) {
+        String kept = "(" + alias + ".voided_at IS NULL OR business_date(:b, " + alias + ".voided_at) <> business_date(:b, " + alias + ".occurred_at))";
+        String late = alias + ".voided_at IS NOT NULL AND business_date(:b, " + alias + ".voided_at) <> business_date(:b, " + alias + ".occurred_at)";
+        return "(SELECT " + alias + ".*, " + alias + ".occurred_at AS at, " + alias + ".amount_minor AS signed, false AS late_void FROM " + table + " " + alias
+                + " WHERE " + alias + ".business_id = :b AND " + kept + " AND " + alias + ".occurred_at >= :s AND " + alias + ".occurred_at < :e"
+                + " UNION ALL SELECT " + alias + ".*, " + alias + ".voided_at, -" + alias + ".amount_minor, true FROM " + table + " " + alias
+                + " WHERE " + alias + ".business_id = :b AND " + late + " AND " + alias + ".voided_at >= :s AND " + alias + ".voided_at < :e)";
+    }
 
     private JdbcClient.StatementSpec q(String sql, UUID business, Range r) {
         var spec = jdbc.sql(sql).param("b", business);
@@ -133,38 +177,110 @@ public class ReportService {
         ctx.require(Permission.VIEW_REPORTS);
         UUID b = ctx.businessId();
         BusinessDayService.Info info = days.info(b);
-        java.util.Map<LocalDate, long[]> sales = new java.util.HashMap<>();
+        Map<LocalDate, long[]> sales = new java.util.HashMap<>();
         q("SELECT " + businessDate("s.completed_at") + ", count(*), coalesce(sum(s.total_minor), 0) FROM sale s WHERE " + SALE_IN_RANGE + " GROUP BY 1", b, r)
                 .query((rs, n) -> { sales.put(rs.getObject(1, LocalDate.class), new long[] {rs.getLong(2), rs.getLong(3)}); return null; }).list();
-        java.util.Map<LocalDate, long[]> cancelled = new java.util.HashMap<>();
-        q("SELECT " + businessDate("s.cancelled_at") + ", count(*), coalesce(sum(s.total_minor), 0) FROM sale s WHERE s.business_id = :b AND s.status = 'CANCELLED' AND s.cancelled_at >= :s AND s.cancelled_at < :e GROUP BY 1", b, r)
+        Map<LocalDate, long[]> cancelled = new java.util.HashMap<>();
+        q("SELECT " + businessDate("s.cancelled_at") + ", count(*), coalesce(sum(s.total_minor), 0) FROM sale s WHERE s.business_id = :b AND s.status = 'CANCELLED' AND s.completed_at IS NOT NULL "
+                + "AND s.cancelled_at >= :s AND s.cancelled_at < :e AND business_date(:b, s.cancelled_at) = business_date(:b, s.completed_at) GROUP BY 1", b, r)
                 .query((rs, n) -> { cancelled.put(rs.getObject(1, LocalDate.class), new long[] {rs.getLong(2), rs.getLong(3)}); return null; }).list();
-        java.util.Map<LocalDate, java.util.Map<String, Long>> paid = new java.util.HashMap<>();
+        Map<LocalDate, long[]> prior = new java.util.HashMap<>();   // [n, total, efectivo]
+        q("SELECT " + businessDate("s.cancelled_at") + ", count(*), coalesce(sum(s.total_minor), 0), coalesce(sum((SELECT coalesce(sum(p.amount_minor), 0) FROM sale_payment p WHERE p.sale_id = s.id AND p.method = 'CASH')), 0) "
+                + "FROM sale s WHERE " + PRIOR_CANCEL_IN_RANGE + " GROUP BY 1", b, r)
+                .query((rs, n) -> { prior.put(rs.getObject(1, LocalDate.class), new long[] {rs.getLong(2), rs.getLong(3), rs.getLong(4)}); return null; }).list();
+        Map<LocalDate, long[]> returned = new java.util.HashMap<>();   // [n, total]
+        q("SELECT " + businessDate("r.occurred_at") + ", count(*), coalesce(sum(r.total_minor), 0) FROM sale_return r WHERE " + RETURN_IN_RANGE + " GROUP BY 1", b, r)
+                .query((rs, n) -> { returned.put(rs.getObject(1, LocalDate.class), new long[] {rs.getLong(2), rs.getLong(3)}); return null; }).list();
+        Map<LocalDate, Map<String, Long>> refunds = new java.util.HashMap<>();
+        q("SELECT " + businessDate("r.occurred_at") + ", f.method, sum(f.amount_minor) FROM sale_return r JOIN sale_return_refund f ON f.return_id = r.id WHERE " + RETURN_IN_RANGE + " GROUP BY 1, 2", b, r)
+                .query((rs, n) -> { refunds.computeIfAbsent(rs.getObject(1, LocalDate.class), k -> new java.util.TreeMap<>()).put(rs.getString(2), rs.getLong(3)); return null; }).list();
+        Map<LocalDate, Map<String, Long>> paid = new java.util.HashMap<>();
         q("SELECT " + businessDate("s.completed_at") + ", p.method, sum(p.amount_minor) FROM sale s JOIN sale_payment p ON p.sale_id = s.id WHERE " + SALE_IN_RANGE + " GROUP BY 1, 2", b, r)
                 .query((rs, n) -> { paid.computeIfAbsent(rs.getObject(1, LocalDate.class), k -> new java.util.TreeMap<>()).put(rs.getString(2), rs.getLong(3)); return null; }).list();
-        java.util.Map<LocalDate, java.util.Map<String, Long>> collected = new java.util.HashMap<>();
-        q("SELECT " + businessDate("c.occurred_at") + ", c.method, sum(c.amount_minor) FROM credit_payment c WHERE c.business_id = :b AND c.voided_at IS NULL AND c.occurred_at >= :s AND c.occurred_at < :e GROUP BY 1, 2", b, r)
-                .query((rs, n) -> { collected.computeIfAbsent(rs.getObject(1, LocalDate.class), k -> new java.util.TreeMap<>()).put(rs.getString(2), rs.getLong(3)); return null; }).list();
-        java.util.Map<LocalDate, long[]> expenses = new java.util.HashMap<>();   // [cajón, otros]
-        q("SELECT " + businessDate("e.occurred_at") + ", e.source = 'CASH_DRAWER', sum(e.amount_minor) FROM expense e WHERE e.business_id = :b AND e.voided_at IS NULL AND e.occurred_at >= :s AND e.occurred_at < :e GROUP BY 1, 2", b, r)
-                .query((rs, n) -> { expenses.computeIfAbsent(rs.getObject(1, LocalDate.class), k -> new long[2])[rs.getBoolean(2) ? 0 : 1] = rs.getLong(3); return null; }).list();
-        java.util.Map<LocalDate, long[]> moves = new java.util.HashMap<>();      // [retiros, entradas]
-        q("SELECT " + businessDate("m.occurred_at") + ", m.kind, sum(m.amount_minor) FROM cash_movement m WHERE m.business_id = :b AND m.voided_at IS NULL AND m.occurred_at >= :s AND m.occurred_at < :e GROUP BY 1, 2", b, r)
-                .query((rs, n) -> { moves.computeIfAbsent(rs.getObject(1, LocalDate.class), k -> new long[2])["WITHDRAWAL".equals(rs.getString(2)) ? 0 : 1] = rs.getLong(3); return null; }).list();
+        Map<LocalDate, Map<String, Long>> collected = new java.util.HashMap<>();
+        Map<LocalDate, long[]> lateCollected = new java.util.HashMap<>();   // [n, total, efectivo]
+        q("SELECT " + businessDate("c.at") + ", c.method, c.late_void, count(*), sum(c.amount_minor) FROM " + ledger("credit_payment", "c") + " c GROUP BY 1, 2, 3", b, r)
+                .query((rs, n) -> {
+                    LocalDate d = rs.getObject(1, LocalDate.class);
+                    if (rs.getBoolean(3)) {
+                        long[] v = lateCollected.computeIfAbsent(d, k -> new long[3]);
+                        v[0] += rs.getLong(4);
+                        v[1] += rs.getLong(5);
+                        if ("CASH".equals(rs.getString(2))) v[2] += rs.getLong(5);
+                    } else {
+                        collected.computeIfAbsent(d, k -> new java.util.TreeMap<>()).merge(rs.getString(2), rs.getLong(5), Long::sum);
+                    }
+                    return null;
+                }).list();
+        Map<LocalDate, long[]> expenses = new java.util.HashMap<>();   // [cajón, otros, anulados tarde cajón (n, monto), anulados tarde otros (n, monto)]
+        q("SELECT " + businessDate("e.at") + ", e.source = 'CASH_DRAWER', e.late_void, count(*), sum(e.amount_minor) FROM " + ledger("expense", "e") + " e GROUP BY 1, 2, 3", b, r)
+                .query((rs, n) -> {
+                    long[] v = expenses.computeIfAbsent(rs.getObject(1, LocalDate.class), k -> new long[6]);
+                    boolean drawer = rs.getBoolean(2);
+                    if (rs.getBoolean(3)) {
+                        v[drawer ? 2 : 4] += rs.getLong(4);
+                        v[drawer ? 3 : 5] += rs.getLong(5);
+                    } else {
+                        v[drawer ? 0 : 1] += rs.getLong(5);
+                    }
+                    return null;
+                }).list();
+        Map<LocalDate, long[]> moves = new java.util.HashMap<>();      // [retiros, entradas, retiros anulados tarde (n, monto), entradas anuladas tarde (n, monto)]
+        q("SELECT " + businessDate("m.at") + ", m.kind, m.late_void, count(*), sum(m.amount_minor) FROM " + ledger("cash_movement", "m") + " m GROUP BY 1, 2, 3", b, r)
+                .query((rs, n) -> {
+                    long[] v = moves.computeIfAbsent(rs.getObject(1, LocalDate.class), k -> new long[6]);
+                    boolean withdrawal = "WITHDRAWAL".equals(rs.getString(2));
+                    if (rs.getBoolean(3)) {
+                        v[withdrawal ? 2 : 4] += rs.getLong(4);
+                        v[withdrawal ? 3 : 5] += rs.getLong(5);
+                    } else {
+                        v[withdrawal ? 0 : 1] += rs.getLong(5);
+                    }
+                    return null;
+                }).list();
 
         List<DayClose> out = new java.util.ArrayList<>();
-        long[] none = new long[2];
+        long[] none = new long[6];
         for (LocalDate d = r.from(); !d.isAfter(r.to()); d = d.plusDays(1)) {
             long[] sv = sales.getOrDefault(d, none);
             long[] cv = cancelled.getOrDefault(d, none);
-            java.util.Map<String, Long> pm = paid.getOrDefault(d, java.util.Map.of());
-            java.util.Map<String, Long> cm = collected.getOrDefault(d, java.util.Map.of());
+            long[] pv = prior.getOrDefault(d, none);
+            long[] rv = returned.getOrDefault(d, none);
+            Map<String, Long> fm = refunds.getOrDefault(d, Map.of());
+            Map<String, Long> pm = paid.getOrDefault(d, Map.of());
+            Map<String, Long> cm = collected.getOrDefault(d, Map.of());
+            long[] lc = lateCollected.getOrDefault(d, none);
             long[] ev = expenses.getOrDefault(d, none);
             long[] mv = moves.getOrDefault(d, none);
-            long expected = pm.getOrDefault("CASH", 0L) + cm.getOrDefault("CASH", 0L) + mv[1] - ev[0] - mv[0];
-            out.add(new DayClose(d, info.startOf(d), info.endOf(d), sv[0], sv[1], amounts(pm), amounts(cm), ev[0], ev[1], mv[0], mv[1], expected, cv[0], cv[1]));
+            long cashRefunds = fm.getOrDefault("CASH", 0L);
+            List<LaterVoid> later = new java.util.ArrayList<>();
+            if (ev[2] > 0) later.add(new LaterVoid("EXPENSE_DRAWER", ev[2], ev[3], ev[3]));
+            if (ev[4] > 0) later.add(new LaterVoid("EXPENSE_OTHER", ev[4], ev[5], 0));
+            if (lc[0] > 0) later.add(new LaterVoid("CREDIT_PAYMENT", lc[0], lc[1], -lc[2]));
+            if (mv[2] > 0) later.add(new LaterVoid("WITHDRAWAL", mv[2], mv[3], mv[3]));
+            if (mv[4] > 0) later.add(new LaterVoid("DEPOSIT", mv[4], mv[5], -mv[5]));
+            long laterCash = later.stream().mapToLong(LaterVoid::cashEffectMinor).sum();
+            long expected = pm.getOrDefault("CASH", 0L) + cm.getOrDefault("CASH", 0L) + mv[1] - ev[0] - mv[0] - cashRefunds - pv[2] + laterCash;
+            out.add(new DayClose(d, info.startOf(d), info.endOf(d), sv[0], sv[1], amounts(pm), amounts(cm), ev[0], ev[1], mv[0], mv[1], expected, cv[0], cv[1],
+                    rv[0], rv[1], amounts(fm), cashRefunds, pv[0], pv[1], pv[2], sv[1] - rv[1] - pv[1], later));
         }
-        return new DailyClose(r, out);
+        return new DailyClose(r, out, syncWarnings(b));
+    }
+
+    /** Teléfonos que pueden tener ventas aún no recibidas: con pendientes informados, o sin sincronizar hace más de 1 h (y usados en la última semana). */
+    public List<DeviceSync> syncWarnings(UUID businessId) {
+        Instant now = clock.instant();
+        return jdbc.sql("""
+                        SELECT id, name, pending_ops, last_sync_at FROM device
+                         WHERE business_id = :b AND revoked_at IS NULL
+                           AND (pending_ops > 0 OR (last_sync_at IS NOT NULL AND last_sync_at < :hour AND last_sync_at >= :week))
+                         ORDER BY pending_ops DESC, name""")
+                .param("b", businessId).param("hour", Timestamp.from(now.minus(1, ChronoUnit.HOURS))).param("week", Timestamp.from(now.minus(7, ChronoUnit.DAYS)))
+                .query((rs, n) -> {
+                    Timestamp last = rs.getTimestamp("last_sync_at");
+                    return new DeviceSync(rs.getObject("id", UUID.class), rs.getString("name"), rs.getInt("pending_ops"), last == null ? null : last.toInstant(),
+                            last == null || last.toInstant().isBefore(now.minus(1, ChronoUnit.HOURS)));
+                }).list();
     }
 
     private static List<MethodAmount> amounts(java.util.Map<String, Long> m) {
@@ -176,7 +292,9 @@ public class ReportService {
         long[] v = q("SELECT count(*), coalesce(sum(total_minor), 0), coalesce(sum(discount_minor), 0) FROM sale s WHERE " + SALE_IN_RANGE, ctx.businessId(), r)
                 .query((rs, n) -> new long[] {rs.getLong(1), rs.getLong(2), rs.getLong(3)}).single();
         long cancelled = q("SELECT count(*) FROM sale s WHERE s.business_id = :b AND s.status = 'CANCELLED' AND s.cancelled_at >= :s AND s.cancelled_at < :e", ctx.businessId(), r).query(Long.class).single();
-        return new Sales(v[0], v[1], v[2], v[0] == 0 ? 0 : Math.round((double) v[1] / v[0]), cancelled);
+        long[] ret = q("SELECT count(*), coalesce(sum(r.total_minor), 0) FROM sale_return r WHERE " + RETURN_IN_RANGE, ctx.businessId(), r).query((rs, n) -> new long[] {rs.getLong(1), rs.getLong(2)}).single();
+        long[] prior = q("SELECT count(*), coalesce(sum(s.total_minor), 0) FROM sale s WHERE " + PRIOR_CANCEL_IN_RANGE, ctx.businessId(), r).query((rs, n) -> new long[] {rs.getLong(1), rs.getLong(2)}).single();
+        return new Sales(v[0], v[1], v[2], v[0] == 0 ? 0 : Math.round((double) v[1] / v[0]), cancelled, ret[0], ret[1], prior[0], prior[1], v[1] - ret[1] - prior[1]);
     }
 
     public List<MethodAmount> byMethod(MemberContext ctx, Range r) {
@@ -203,7 +321,7 @@ public class ReportService {
 
     public Profit profit(MemberContext ctx, Range r) {
         ctx.require(Permission.VIEW_REPORTS);
-        long sales = sales(ctx, r).totalMinor();
+        long sales = sales(ctx, r).netMinor();
         long[] lines = q("""
                         SELECT coalesce(sum(CASE WHEN i.unit_cost_minor IS NOT NULL THEN floor((i.unit_cost_minor::numeric * i.quantity_milli + 500) / 1000) END), 0)::bigint,
                                coalesce(sum(CASE WHEN i.unit_cost_minor IS NOT NULL THEN floor((i.unit_price_minor::numeric * i.quantity_milli + 500) / 1000) - i.discount_minor END), 0)::bigint,
@@ -211,7 +329,12 @@ public class ReportService {
                           FROM sale_item i JOIN sale s ON s.id = i.sale_id """ + " WHERE " + SALE_IN_RANGE, ctx.businessId(), r)
                 .query((rs, n) -> new long[] {rs.getLong(1), rs.getLong(2), rs.getLong(3)}).single();
         long[] ex = expenseSplit(ctx.businessId(), r);
-        long cogs = lines[0];
+        // Lo devuelto y lo anulado después (en otra jornada) también deja de ser costo de lo vendido, en la jornada en que ocurre.
+        long returnedCost = q("SELECT coalesce(sum(floor((i.unit_cost_minor::numeric * i.quantity_milli + 500) / 1000)), 0)::bigint FROM sale_return_item i JOIN sale_return r ON r.id = i.return_id "
+                + "WHERE i.unit_cost_minor IS NOT NULL AND " + RETURN_IN_RANGE, ctx.businessId(), r).query(Long.class).single();
+        long priorCost = q("SELECT coalesce(sum(floor((i.unit_cost_minor::numeric * i.quantity_milli + 500) / 1000)), 0)::bigint FROM sale_item i JOIN sale s ON s.id = i.sale_id "
+                + "WHERE i.unit_cost_minor IS NOT NULL AND " + PRIOR_CANCEL_IN_RANGE, ctx.businessId(), r).query(Long.class).single();
+        long cogs = lines[0] - returnedCost - priorCost;
         int coverage = lines[2] == 0 ? 100 : (int) Math.round(100.0 * lines[1] / lines[2]);
         return new Profit(sales, cogs, ex[0], ex[1], sales - cogs - ex[0], coverage,
                 "ganancia = ventas − costo de lo vendido − gastos operativos (sin compras de mercadería ni retiros de caja)");
@@ -220,10 +343,10 @@ public class ReportService {
     /** [operativos, compras de mercadería excluidas] */
     private long[] expenseSplit(UUID business, Range r) {
         return q("""
-                        SELECT coalesce(sum(CASE WHEN e.ref_type = 'SUPPLIER_PAYMENT' OR c.key = 'goods' THEN 0 ELSE e.amount_minor END), 0)::bigint,
-                               coalesce(sum(CASE WHEN e.ref_type = 'SUPPLIER_PAYMENT' OR c.key = 'goods' THEN e.amount_minor ELSE 0 END), 0)::bigint
-                          FROM expense e LEFT JOIN expense_category c ON c.id = e.category_id
-                         WHERE e.business_id = :b AND e.voided_at IS NULL AND e.occurred_at >= :s AND e.occurred_at < :e""", business, r)
+                        SELECT coalesce(sum(CASE WHEN e.ref_type = 'SUPPLIER_PAYMENT' OR c.key = 'goods' THEN 0 ELSE e.signed END), 0)::bigint,
+                               coalesce(sum(CASE WHEN e.ref_type = 'SUPPLIER_PAYMENT' OR c.key = 'goods' THEN e.signed ELSE 0 END), 0)::bigint
+                          FROM """ + ledger("expense", "x") + """
+                         e LEFT JOIN expense_category c ON c.id = e.category_id""", business, r)
                 .query((rs, n) -> new long[] {rs.getLong(1), rs.getLong(2)}).single();
     }
 
@@ -301,10 +424,10 @@ public class ReportService {
     public ExpenseReport expenses(MemberContext ctx, Range r) {
         ctx.require(Permission.VIEW_REPORTS);
         long[] split = expenseSplit(ctx.businessId(), r);
-        long[] sources = q("SELECT coalesce(sum(CASE WHEN source = 'CASH_DRAWER' THEN amount_minor END), 0)::bigint, coalesce(sum(CASE WHEN source <> 'CASH_DRAWER' THEN amount_minor END), 0)::bigint "
-                + "FROM expense e WHERE e.business_id = :b AND e.voided_at IS NULL AND e.occurred_at >= :s AND e.occurred_at < :e", ctx.businessId(), r).query((rs, n) -> new long[] {rs.getLong(1), rs.getLong(2)}).single();
-        List<CategoryAmount> cats = q("SELECT e.category_id, c.key, c.name, sum(e.amount_minor)::bigint FROM expense e LEFT JOIN expense_category c ON c.id = e.category_id "
-                + "WHERE e.business_id = :b AND e.voided_at IS NULL AND e.occurred_at >= :s AND e.occurred_at < :e GROUP BY 1, 2, 3 ORDER BY 4 DESC", ctx.businessId(), r)
+        long[] sources = q("SELECT coalesce(sum(CASE WHEN source = 'CASH_DRAWER' THEN signed END), 0)::bigint, coalesce(sum(CASE WHEN source <> 'CASH_DRAWER' THEN signed END), 0)::bigint "
+                + "FROM " + ledger("expense", "x") + " e", ctx.businessId(), r).query((rs, n) -> new long[] {rs.getLong(1), rs.getLong(2)}).single();
+        List<CategoryAmount> cats = q("SELECT e.category_id, c.key, c.name, sum(e.signed)::bigint FROM " + ledger("expense", "x") + " e LEFT JOIN expense_category c ON c.id = e.category_id "
+                + "GROUP BY 1, 2, 3 HAVING sum(e.signed) <> 0 ORDER BY 4 DESC", ctx.businessId(), r)
                 .query((rs, n) -> new CategoryAmount(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3), rs.getLong(4))).list();
         return new ExpenseReport(split[0], split[1], sources[0], sources[1], cats);
     }
@@ -359,8 +482,19 @@ public class ReportService {
             if (p != null) p[0] = rs.getLong(2);
             return null;
         }).list();
-        q("SELECT " + businessDate("e.occurred_at") + ", sum(e.amount_minor) FROM expense e LEFT JOIN expense_category c ON c.id = e.category_id WHERE e.business_id = :b AND e.voided_at IS NULL "
-                + "AND e.occurred_at >= :s AND e.occurred_at < :e AND (e.ref_type IS NULL OR e.ref_type <> 'SUPPLIER_PAYMENT') AND coalesce(c.key, '') <> 'goods' GROUP BY 1", ctx.businessId(), r).query((rs, n) -> {
+        // Devoluciones y ventas de días anteriores anuladas restan en SU jornada.
+        q("SELECT " + businessDate("r.occurred_at") + ", sum(r.total_minor) FROM sale_return r WHERE " + RETURN_IN_RANGE + " GROUP BY 1", ctx.businessId(), r).query((rs, n) -> {
+            long[] p = series.get(rs.getObject(1, LocalDate.class));
+            if (p != null) p[0] -= rs.getLong(2);
+            return null;
+        }).list();
+        q("SELECT " + businessDate("s.cancelled_at") + ", sum(s.total_minor) FROM sale s WHERE " + PRIOR_CANCEL_IN_RANGE + " GROUP BY 1", ctx.businessId(), r).query((rs, n) -> {
+            long[] p = series.get(rs.getObject(1, LocalDate.class));
+            if (p != null) p[0] -= rs.getLong(2);
+            return null;
+        }).list();
+        q("SELECT " + businessDate("e.at") + ", sum(e.signed) FROM " + ledger("expense", "x") + " e LEFT JOIN expense_category c ON c.id = e.category_id WHERE "
+                + "(e.ref_type IS NULL OR e.ref_type <> 'SUPPLIER_PAYMENT') AND coalesce(c.key, '') <> 'goods' GROUP BY 1", ctx.businessId(), r).query((rs, n) -> {
             long[] p = series.get(rs.getObject(1, LocalDate.class));
             if (p != null) p[1] = rs.getLong(2);
             return null;

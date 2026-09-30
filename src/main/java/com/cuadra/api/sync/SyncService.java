@@ -67,11 +67,18 @@ public class SyncService {
     private final SupplierService suppliers;
     private final PurchaseService purchases;
     private final NotificationService notifications;
+    private final com.cuadra.api.tenancy.Access access;
+    private final com.cuadra.api.sale.ReturnService returns;
+    private final com.cuadra.api.common.Audit audit;
 
-    public SyncService(JdbcClient jdbc, PlatformTransactionManager tm, JsonMapper mapper, Clock clock, ProductService products,
+    public SyncService(com.cuadra.api.tenancy.Access access, JdbcClient jdbc, PlatformTransactionManager tm, JsonMapper mapper, Clock clock, ProductService products,
                        CategoryService categories, SaleService sales, MemberService members, BusinessService businesses, CustomerService customers,
                        CreditService credits, TemplateService templates, ExpenseService expenses, CashMovementService movements, ShiftService shifts,
-                       StockService stock, SupplierService suppliers, PurchaseService purchases, NotificationService notifications) {
+                       StockService stock, SupplierService suppliers, PurchaseService purchases, NotificationService notifications,
+                       com.cuadra.api.sale.ReturnService returns, com.cuadra.api.common.Audit audit) {
+        this.access = access;
+        this.returns = returns;
+        this.audit = audit;
         this.jdbc = jdbc;
         this.tx = new TransactionTemplate(tm);
         this.mapper = mapper;
@@ -93,10 +100,21 @@ public class SyncService {
         this.notifications = notifications;
     }
 
-    public record OpInput(UUID opId, String kind, UUID entityId, JsonNode payload) {}
+    /**
+     * `memberId`: quién hizo la operación (el teléfono lo guarda al hacerla; sin él se usa la persona de la cabecera). `createdAt`: la hora del teléfono al
+     * hacerla; decide si alguien dado de baja la hizo antes de la baja.
+     */
+    public record OpInput(UUID opId, String kind, UUID entityId, JsonNode payload, UUID memberId, java.time.Instant createdAt) {
+        public OpInput(UUID opId, String kind, UUID entityId, JsonNode payload) { this(opId, kind, entityId, payload, null, null); }
+    }
 
-    /** status: APPLIED | DUPLICATE (ya recibida) | STALE (versión vieja ignorada) | REJECTED (con `code`; el teléfono la muestra). */
-    public record OpResult(UUID opId, String status, String code, Long rev) {}
+    /**
+     * status: APPLIED | DUPLICATE (ya recibida) | STALE (versión vieja ignorada) | REJECTED (con `code`; el teléfono la muestra).
+     * Un APPLIED puede traer `code` como aviso (p. ej. SALE_CONFLICT_COPY: se guardó como venta aparte para revisar). `detail`: datos para explicar un rechazo.
+     */
+    public record OpResult(UUID opId, String status, String code, Long rev, Map<String, Object> detail) {
+        public OpResult(UUID opId, String status, String code, Long rev) { this(opId, status, code, rev, null); }
+    }
 
     public record Change(String type, long rev, Object data) {}
 
@@ -104,43 +122,81 @@ public class SyncService {
 
     // ---------- push ----------
 
-    public List<OpResult> push(MemberContext ctx, List<OpInput> ops, Integer pendingOps) {
-        if (ops == null || ops.isEmpty()) return List.of();
+    public List<OpResult> push(com.cuadra.api.tenancy.Access.Pusher pusher, List<OpInput> ops, Integer pendingOps) {
+        MemberContext ctx = pusher.ctx();
+        if (ops == null || ops.isEmpty()) {
+            touchDevice(ctx, pendingOps);
+            return List.of();
+        }
         if (ops.size() > MAX_OPS) throw ApiException.badRequest("TOO_MANY_OPS", "At most " + MAX_OPS + " operations per batch");
         List<OpResult> results = new ArrayList<>();
-        for (OpInput op : ops) results.add(pushOne(ctx, op));
-        touchDevice(ctx, pendingOps);
+        Map<UUID, Object[]> members = new java.util.HashMap<>();
+        Map<UUID, long[]> late = new LinkedHashMap<>();
+        for (OpInput op : ops) results.add(pushOne(pusher, ctx, op, members, late));
+        touchDevice(ctx, finalPending(pendingOps, results));
+        notifyLate(ctx.businessId(), late, ops.get(0).opId());
         return results;
     }
 
-    private OpResult pushOne(MemberContext ctx, OpInput op) {
+    /**
+     * Lo pendiente que informó el teléfono cuenta también las operaciones de ESTE envío: se descuentan las que quedaron resueltas (aplicadas o rechazadas
+     * para siempre), para que el cierre del día no avise de pendientes que ya llegaron.
+     */
+    private static Integer finalPending(Integer reported, List<OpResult> results) {
+        if (reported == null) return null;
+        long settled = results.stream().filter(r -> r.code() == null || (!TRANSIENT_CODES.contains(r.code()) && !"INTERNAL_ERROR".equals(r.code()))).count();
+        return (int) Math.max(0, reported - settled);
+    }
+
+    /** Un aviso al dueño por persona y envío: cuántas operaciones de alguien dado de baja llegaron después de su baja, y por cuánto. */
+    private void notifyLate(UUID businessId, Map<UUID, long[]> late, UUID batchId) {
+        late.forEach((member, v) -> {
+            String name = jdbc.sql("SELECT display_name FROM member WHERE id = :m").param("m", member).query(String.class).optional().orElse("");
+            notifications.notify(businessId, NotificationService.Type.LATE_AFTER_DISABLE, Map.of("memberId", member.toString(), "memberName", name, "count", v[0], "amountMinor", v[1]),
+                    null, null, "LATE_AFTER_DISABLE:" + member + ":" + batchId, "cuadra://ventas");
+        });
+    }
+
+    private OpResult pushOne(com.cuadra.api.tenancy.Access.Pusher pusher, MemberContext sender, OpInput original, Map<UUID, Object[]> members, Map<UUID, long[]> late) {
+        OpInput op = original;
         if (op.opId() == null || op.kind() == null) return new OpResult(op.opId(), "REJECTED", "INVALID_OP", null);
-        OpResult seen = receipt(ctx, op.opId());
+        OpResult seen = receipt(sender, op.opId());
         if (seen != null) return seen;
         try {
+            // Cada operación se aplica con la persona que la HIZO (no con la que está activa al enviarla): así una venta de Ana enviada cuando ya atiende
+            // Beto queda a nombre de Ana, y un retiro del dueño no llega con el rol de un cajero.
+            MemberContext acting = access.actingFor(pusher, op.memberId(), op.createdAt(), members);
+            boolean afterDisable = access.isDisabled(pusher, op.memberId(), members);
+            boolean[] clockAdjusted = {false};
+            final OpInput toApply = clampClock(pusher, acting, op, clockAdjusted);
             OpResult applied = tx.execute(status -> {
-                OpResult r = apply(ctx, op);
-                insertReceipt(ctx, op, r);
+                OpResult r = apply(acting, toApply);
+                insertReceipt(acting, toApply, r);
+                if ("APPLIED".equals(r.status()) && (afterDisable || clockAdjusted[0])) {
+                    long amount = flag(acting, toApply, afterDisable ? "LATE_AFTER_DISABLE" : "CLOCK_ADJUSTED");
+                    if (afterDisable) late.computeIfAbsent(acting.memberId(), k -> new long[2])[0]++;
+                    if (afterDisable) late.get(acting.memberId())[1] += amount;
+                }
                 return r;
             });
             return applied;
         } catch (DuplicateKeyException e) {
             // Dos envíos simultáneos de la misma operación: el segundo pierde contra el recibo del primero.
-            OpResult again = receipt(ctx, op.opId());
+            OpResult again = receipt(sender, op.opId());
             if (again != null) return again;
             // Sin recibo visible: el id de la operación o el de la entidad ya lo usa OTRO negocio (invisible por el aislamiento).
             boolean receiptKey = com.cuadra.api.common.Constraints.name(e).map("operation_receipt_pkey"::equals).orElse(false);
             boolean primaryKey = com.cuadra.api.common.Constraints.isPrimaryKey(e);
             return new OpResult(op.opId(), "REJECTED", receiptKey ? "OP_ID_TAKEN" : primaryKey ? "ID_TAKEN" : "CONFLICT", null);
         } catch (ApiException e) {
-            OpResult rejected = new OpResult(op.opId(), "REJECTED", e.code(), null);
+            OpResult rejected = new OpResult(op.opId(), "REJECTED", e.code(), null, e.details().isEmpty() ? null : Map.copyOf(withoutNulls(e.details())));
             // Un rechazo pasajero (p. ej. la cuenta está abierta en otro teléfono) NO se recuerda: al repetir la misma operación debe
             // volver a evaluarse, no devolver para siempre el veredicto viejo.
-            if (!TRANSIENT_CODES.contains(e.code())) tx.executeWithoutResult(s -> insertReceipt(ctx, op, rejected));
+            if (!TRANSIENT_CODES.contains(e.code())) tx.executeWithoutResult(s -> insertReceipt(sender, op, rejected));
             return rejected;
         } catch (JacksonException e) {
             OpResult rejected = new OpResult(op.opId(), "REJECTED", "MALFORMED_PAYLOAD", null);
-            tx.executeWithoutResult(s -> insertReceipt(ctx, op, rejected));
+            tx.executeWithoutResult(s -> insertReceipt(sender, op, rejected));
             return rejected;
         } catch (RuntimeException e) {
             // Error nuestro (no del teléfono): no se guarda recibo para que el reintento pueda tener éxito.
@@ -157,18 +213,35 @@ public class SyncService {
                 var r = products.upsert(ctx, id, mapper.treeToValue(op.payload(), ProductService.ProductInput.class));
                 yield new OpResult(op.opId(), "APPLIED", null, r.product().rev());
             }
+            case "PRODUCT_PATCH" -> {
+                // Solo los campos que cambió el teléfono (`set`): un teléfono con datos viejos no revierte el precio o el costo que otro cambió.
+                var r = products.patch(ctx, id, op.payload());
+                yield new OpResult(op.opId(), "APPLIED", null, r.product().rev());
+            }
             case "CATEGORY_UPSERT" -> {
                 var r = categories.upsert(ctx, id, mapper.treeToValue(op.payload(), CategoryService.CategoryInput.class));
                 yield new OpResult(op.opId(), "APPLIED", null, r.rev());
             }
             case "SALE_UPSERT" -> {
-                var r = sales.upsert(ctx, id, mapper.treeToValue(op.payload(), SaleService.SaleInput.class));
+                var r = sales.upsert(ctx, id, mapper.treeToValue(op.payload(), SaleService.SaleInput.class), op.opId());
+                // Se guardó como venta aparte (chocó con otra versión cobrada o descartada): aplicada, con un aviso para que el teléfono la muestre en
+                // «Requiere atención» con el id de la copia.
+                if (r.outcome() == SaleService.Outcome.CONFLICT_COPY) {
+                    yield new OpResult(op.opId(), "APPLIED", "SALE_CONFLICT_COPY", r.sale().rev(), Map.of("copySaleId", r.sale().id().toString()));
+                }
                 yield new OpResult(op.opId(), r.outcome() == SaleService.Outcome.STALE ? "STALE" : "APPLIED", null, r.sale().rev());
             }
             case "SALE_CANCEL" -> {
                 String reason = op.payload() != null && op.payload().hasNonNull("reason") ? op.payload().get("reason").asString() : null;
-                var v = sales.cancel(ctx, id, reason);
+                var v = sales.cancel(ctx, id, reason, op.createdAt());
                 yield new OpResult(op.opId(), "APPLIED", null, v.rev());
+            }
+            case "SALE_RETURN" -> {
+                var in = mapper.treeToValue(op.payload(), com.cuadra.api.sale.ReturnService.ReturnInput.class);
+                // Sin hora propia en la devolución, la de la operación (la hora del teléfono al hacerla): cuenta en la jornada en que se hizo.
+                if (in.occurredAt() == null && op.createdAt() != null) in = new com.cuadra.api.sale.ReturnService.ReturnInput(in.saleId(), in.items(), in.reason(), in.refundMethod(), op.createdAt());
+                var r = returns.create(ctx, id, in);
+                yield new OpResult(op.opId(), "APPLIED", null, sales.view(ctx.businessId(), r.ret().saleId()).rev());
             }
             case "CUSTOMER_UPSERT" -> {
                 var r = customers.upsert(ctx, id, mapper.treeToValue(op.payload(), CustomerService.CustomerInput.class));
@@ -231,6 +304,75 @@ public class SyncService {
         };
     }
 
+    // ---------- relojes imposibles y operaciones tardías ----------
+
+    /** Operaciones que CREAN algo con hora propia: la tabla donde vive, para saber si ya existe (entonces su hora ya es la del servidor y no se toca). */
+    private static final Map<String, String> CREATES = Map.of("SALE_UPSERT", "sale", "EXPENSE_UPSERT", "expense", "CASH_MOVEMENT_UPSERT", "cash_movement",
+            "CREDIT_UPSERT", "credit", "CREDIT_PAYMENT", "credit_payment", "STOCK_MOVEMENT_ADD", "stock_movement", "SALE_RETURN", "sale_return",
+            "PURCHASE_REGISTER", "purchase", "SUPPLIER_PAYMENT", "supplier_payment");
+    private static final List<String> TIME_FIELDS = List.of("createdAt", "completedAt", "occurredAt");
+
+    /**
+     * Un teléfono con la hora imposible (antes de que se vinculara —p. ej. reiniciado al año 2000— o más de unos minutos en el futuro) mandaría sus ventas
+     * a otro día. Lo nuevo que llega con esa hora se registra con la hora del SERVIDOR al recibirlo y queda marcado (CLOCK_ADJUSTED) para revisar.
+     */
+    private OpInput clampClock(com.cuadra.api.tenancy.Access.Pusher pusher, MemberContext ctx, OpInput op, boolean[] adjusted) {
+        String table = CREATES.get(op.kind());
+        if (table == null || pusher.deviceLinkedAt() == null || op.entityId() == null || op.payload() == null || !op.payload().isObject()) return op;
+        java.time.Instant now = clock.instant();
+        java.time.Instant floor = pusher.deviceLinkedAt().minus(com.cuadra.api.tenancy.Access.CLOCK_SKEW);
+        java.time.Instant ceil = now.plus(com.cuadra.api.tenancy.Access.CLOCK_SKEW);
+        tools.jackson.databind.node.ObjectNode copy = null;
+        for (String f : TIME_FIELDS) {
+            if (!op.payload().hasNonNull(f)) continue;
+            java.time.Instant t;
+            try {
+                t = java.time.Instant.parse(op.payload().get(f).asString());
+            } catch (RuntimeException e) {
+                continue;
+            }
+            if (!t.isBefore(floor) && !t.isAfter(ceil)) continue;
+            if (copy == null) {
+                String exists = "credit_payment".equals(table) ? "SELECT count(*) FROM credit_payment WHERE (id = :id OR group_id = :id) AND business_id = :b"
+                        : "SELECT count(*) FROM " + table + " WHERE id = :id AND business_id = :b";
+                if (jdbc.sql(exists).param("id", op.entityId()).param("b", ctx.businessId()).query(Integer.class).single() > 0) return op;
+                copy = ((tools.jackson.databind.node.ObjectNode) op.payload()).deepCopy();
+            }
+            copy.put(f, now.toString());
+        }
+        if (copy == null) return op;
+        adjusted[0] = true;
+        audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "sync.clock_adjusted", op.kind(), op.entityId(), "createdAt=" + op.createdAt());
+        return new OpInput(op.opId(), op.kind(), op.entityId(), copy, op.memberId(), op.createdAt());
+    }
+
+    /** Marca lo aplicado para revisar (la venta lleva la etiqueta) y devuelve su monto, para el aviso al dueño. */
+    private long flag(MemberContext ctx, OpInput op, String flag) {
+        long amount = 0;
+        if ("SALE_UPSERT".equals(op.kind())) {
+            UUID saleId = op.entityId();
+            jdbc.sql("UPDATE sale SET review_flag = :f, rev = nextval('change_rev_seq') WHERE id = :id AND business_id = :b AND status = 'COMPLETED' AND (review_flag IS NULL OR :f = 'LATE_AFTER_DISABLE')")
+                    .param("f", flag).param("id", saleId).param("b", ctx.businessId()).update();
+            amount = jdbc.sql("SELECT total_minor FROM sale WHERE id = :id AND business_id = :b AND status = 'COMPLETED'").param("id", saleId).param("b", ctx.businessId())
+                    .query(Long.class).optional().orElse(0L);
+        } else if ("SALE_RETURN".equals(op.kind())) {
+            amount = jdbc.sql("SELECT total_minor FROM sale_return WHERE id = :id").param("id", op.entityId()).query(Long.class).optional().orElse(0L);
+        } else if (op.payload() != null && op.payload().hasNonNull("amountMinor")) {
+            amount = op.payload().get("amountMinor").asLong();
+        }
+        if ("LATE_AFTER_DISABLE".equals(flag)) {
+            audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "sync.late_after_disable", op.kind(), op.entityId(),
+                    "llegó después de la baja; hecha " + op.createdAt() + " amount=" + amount);
+        }
+        return amount;
+    }
+
+    private static Map<String, Object> withoutNulls(Map<String, Object> m) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        m.forEach((k, v) -> { if (v != null) out.put(k, v); });
+        return out;
+    }
+
     private static String reasonOf(OpInput op) {
         return op.payload() != null && op.payload().hasNonNull("reason") ? op.payload().get("reason").asString() : null;
     }
@@ -262,7 +404,12 @@ public class SyncService {
      * Nota: `rev` sale de una secuencia; una transacción larga podría confirmar tarde con un `rev` ya superado. El teléfono
      * vuelve a pedir desde su cursor en cada ciclo, y esa ventana se cerrará con el horizonte de xmin en la fase 9.
      */
-    public PullResult pull(MemberContext ctx, boolean forDevice, long since, int limit) {
+    public PullResult pull(MemberContext ctx, Role deviceTrust, long since, int limit) {
+        return pull(ctx, deviceTrust, since, limit, null);
+    }
+
+    /** `pendingOps`: lo que el teléfono aún tiene sin enviar al bajar (ya después de subir): el cierre del día avisa con este número. */
+    public PullResult pull(MemberContext ctx, Role deviceTrust, long since, int limit, Integer pendingOps) {
         limit = Math.max(1, Math.min(limit, 500));
         boolean cashier = ctx.role() == Role.CASHIER;
         String saleFilter = cashier
@@ -333,7 +480,7 @@ public class SyncService {
                 }
                 case "product" -> data = products.get(ctx.businessId(), id);
                 case "member" -> {
-                    if (allMembers == null) allMembers = members.list(ctx.businessId(), forDevice);
+                    if (allMembers == null) allMembers = deviceTrust == null ? members.list(ctx.businessId(), false) : members.listForDevice(ctx.businessId(), deviceTrust);
                     data = allMembers.stream().filter(m -> m.id().equals(id)).findFirst().orElse(null);
                 }
                 case "cash_register" -> {
@@ -345,7 +492,7 @@ public class SyncService {
             }
             if (data != null) changes.add(new Change(type, rev, data));
         }
-        touchDevice(ctx, null);
+        touchDevice(ctx, pendingOps);
         long cursor = rows.isEmpty() ? since : (Long) rows.get(rows.size() - 1)[0];
         return new PullResult(changes, cursor, hasMore);
     }

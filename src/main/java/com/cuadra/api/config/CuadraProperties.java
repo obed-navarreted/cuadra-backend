@@ -20,7 +20,7 @@ public record CuadraProperties(
         }
     }
 
-    public record Support(String inboxEmail) {}
+    public record Support(String inboxEmail, String whatsapp) {}
 
     /**
      * `adminUser`/`adminPasswordHash`: acceso de la consola con usuario y contraseña (además de Google). Solo el HASH bcrypt de la contraseña, y solo por
@@ -36,5 +36,5 @@ public record CuadraProperties(
         public boolean passwordLoginEnabled() { return !adminUser.isEmpty() && adminPasswordHash.startsWith("$2"); }
     }
 
-    public record App(String baseUrl, String minAppVersion, String donationUrl, String donationMode) {}
+    public record App(String baseUrl, String minAppVersion) {}
 }

@@ -105,17 +105,20 @@ abstract class ApiTestBase {
     /** Crea un miembro con PIN y devuelve su id. */
     protected UUID createPinMember(String ownerToken, UUID businessId, String name, String role) throws Exception {
         String json = call(post("/api/b/" + businessId + "/members"), bearer(ownerToken),
-                "{\"displayName\":\"" + name + "\",\"role\":\"" + role + "\",\"pin\":\"1234\"}")
+                "{\"displayName\":\"" + name + "\",\"role\":\"" + role + "\",\"pin\":\"12345\"}")
                 .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
         return UUID.fromString(JsonPath.read(json, "$.id"));
     }
 
-    /** Un miembro Google con el rol dado se une por invitación. */
+    @Autowired protected org.springframework.jdbc.core.simple.JdbcClient baseJdbc;
+
+    /** Siembra una persona con cuenta de Google y el rol dado en el negocio (ya no hay invitaciones: el modelo la admite, pero solo el dueño usa Google). */
     protected String joinAs(String ownerToken, UUID businessId, String who, String role) throws Exception {
         String guest = login(who);
-        String inv = call(post("/api/b/" + businessId + "/invitations"), bearer(ownerToken), "{\"role\":\"" + role + "\"}")
-                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
-        call(post("/api/invitations/" + JsonPath.read(inv, "$.code") + "/accept"), bearer(guest), null).andExpect(status().isOk());
+        String me = call(get("/api/me"), bearer(guest), null).andReturn().getResponse().getContentAsString();
+        UUID userId = UUID.fromString(JsonPath.read(me, "$.id"));
+        baseJdbc.sql("INSERT INTO member (id, business_id, user_account_id, display_name, role, created_by_member_id) VALUES (:id, :b, :u, :n, :r, :id)")
+                .param("id", UUID.randomUUID()).param("b", businessId).param("u", userId).param("n", who).param("r", role).update();
         return guest;
     }
 

@@ -20,10 +20,24 @@ public final class CountryDefaults {
             Map.entry("CL", new Defaults("CLP", "America/Santiago", "es")),
             Map.entry("AR", new Defaults("ARS", "America/Argentina/Buenos_Aires", "es")),
             Map.entry("DO", new Defaults("DOP", "America/Santo_Domingo", "es")),
+            Map.entry("BO", new Defaults("BOB", "America/La_Paz", "es")),
+            Map.entry("PY", new Defaults("PYG", "America/Asuncion", "es")),
+            Map.entry("UY", new Defaults("UYU", "America/Montevideo", "es")),
+            Map.entry("VE", new Defaults("VES", "America/Caracas", "es")),
+            Map.entry("PR", new Defaults("USD", "America/Puerto_Rico", "es")),
             Map.entry("ES", new Defaults("EUR", "Europe/Madrid", "es")),
             Map.entry("US", new Defaults("USD", "America/New_York", "en")));
 
     private CountryDefaults() {}
+
+    /** Todos los países con sugerencia, en orden por código. */
+    public static java.util.SortedMap<String, Defaults> all() {
+        return new java.util.TreeMap<>(BY_COUNTRY);
+    }
+
+    public static boolean known(String country) {
+        return country != null && BY_COUNTRY.containsKey(country.toUpperCase());
+    }
 
     public static Defaults of(String country) {
         return BY_COUNTRY.getOrDefault(country.toUpperCase(), new Defaults("USD", "UTC", "en"));

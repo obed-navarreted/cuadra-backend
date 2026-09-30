@@ -157,11 +157,49 @@ public class ProductImportService {
         return switch (currency) { case "CRC", "COP", "CLP", "PYG" -> 0; default -> 2; };
     }
 
-    /** "12.50" o "12,50" → unidad menor. Más decimales que la moneda o basura → error. Vacío → null. */
+    /**
+     * Número escrito en una hoja de cálculo → forma canónica ("1234.56"). El separador decimal es el ÚLTIMO de los dos que aparezca: "1,000.00" y
+     * "1.000,00" son mil. Con un solo tipo de separador: si se repite ("1.000.000") es de miles; si aparece una vez seguido de exactamente 3 cifras y el
+     * campo admite menos de 3 decimales (dinero: "1,000"), también es de miles; si no, es el decimal ("12,50", "1,5"). Los grupos de miles deben ser de
+     * 3 cifras; si no, se devuelve tal cual y la validación lo rechaza (mejor un error que un precio 1000 veces más chico).
+     */
+    static String canonicalNumber(String raw, int maxDecimals) {
+        String s = raw.replace(" ", "").replace("\u00a0", "");
+        int comma = s.lastIndexOf(',');
+        int dot = s.lastIndexOf('.');
+        if (comma < 0 && dot < 0) return s;
+        Character dec;
+        char group;
+        if (comma >= 0 && dot >= 0) {
+            dec = comma > dot ? ',' : '.';
+            group = dec == ',' ? '.' : ',';
+        } else {
+            char sep = comma >= 0 ? ',' : '.';
+            long count = s.chars().filter(ch -> ch == sep).count();
+            int after = s.length() - s.lastIndexOf(sep) - 1;
+            boolean thousands = count > 1 || (after == 3 && maxDecimals < 3);
+            dec = thousands ? null : sep;
+            group = sep;
+        }
+        String intPart = s;
+        String frac = null;
+        if (dec != null) {
+            int at = s.lastIndexOf(dec);
+            intPart = s.substring(0, at);
+            frac = s.substring(at + 1);
+        }
+        if (intPart.indexOf(group) >= 0) {
+            if (!intPart.matches("\\d{1,3}(" + java.util.regex.Pattern.quote(String.valueOf(group)) + "\\d{3})+")) return raw;
+            intPart = intPart.replace(String.valueOf(group), "");
+        }
+        return frac == null ? intPart : intPart + "." + frac;
+    }
+
+    /** "12.50", "12,50", "1,000.00" o "1.000,00" → unidad menor. Más decimales que la moneda o basura → error. Vacío → null. */
     static Long money(String raw, int decimals, String code) {
         String s = blank(raw);
         if (s == null) return null;
-        s = s.replace(',', '.');
+        s = canonicalNumber(s, decimals);
         if (!s.matches("\\d{1,12}(\\.\\d+)?")) throw ApiException.badRequest(code, "Invalid amount");
         BigDecimal v = new BigDecimal(s);
         if (v.stripTrailingZeros().scale() > decimals) throw ApiException.badRequest(code, "Too many decimals");
@@ -172,7 +210,7 @@ public class ProductImportService {
     static Long quantity(String raw, String code) {
         String s = blank(raw);
         if (s == null) return null;
-        s = s.replace(',', '.');
+        s = canonicalNumber(s, 3);
         if (!s.matches("\\d{1,9}(\\.\\d+)?")) throw ApiException.badRequest(code, "Invalid quantity");
         BigDecimal v = new BigDecimal(s);
         if (v.stripTrailingZeros().scale() > 3) throw ApiException.badRequest(code, "Too many decimals");

@@ -33,15 +33,15 @@ public class SyncController {
     @PostMapping("/push")
     public PushResponse push(@AuthenticationPrincipal Actor actor, @PathVariable UUID businessId,
                              @RequestHeader(value = Access.MEMBER_HEADER, required = false) UUID memberId, @RequestBody PushRequest body) {
-        MemberContext ctx = access.member(actor, businessId, memberId);
-        return new PushResponse(sync.push(ctx, body.ops(), body.pendingOps()));
+        return new PushResponse(sync.push(access.pusher(actor, businessId, memberId), body.ops(), body.pendingOps()));
     }
 
     @GetMapping("/pull")
     public SyncService.PullResult pull(@AuthenticationPrincipal Actor actor, @PathVariable UUID businessId,
                                        @RequestHeader(value = Access.MEMBER_HEADER, required = false) UUID memberId,
-                                       @RequestParam(defaultValue = "0") long since, @RequestParam(defaultValue = "200") int limit) {
+                                       @RequestParam(defaultValue = "0") long since, @RequestParam(defaultValue = "200") int limit,
+                                       @RequestParam(required = false) Integer pendingOps) {
         MemberContext ctx = access.member(actor, businessId, memberId);
-        return sync.pull(ctx, actor.isDevice(), since, limit);
+        return sync.pull(ctx, actor.isDevice() ? Access.deviceTrust(actor) : null, since, limit, pendingOps == null ? null : Math.max(0, pendingOps));
     }
 }

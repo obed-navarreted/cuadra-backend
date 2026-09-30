@@ -62,7 +62,28 @@ public class AuthService {
                 .param("id", UUID.randomUUID()).param("u", userId).param("h", TokenHasher.hash(token))
                 .param("k", kind).param("ua", userAgent).param("now", Timestamp.from(now))
                 .param("exp", Timestamp.from(expires)).update();
+        revokeBeyondLimit(userId, kind, now);
         return new LoginResult(token, expires, userId);
+    }
+
+    /** Máximo de sesiones activas por persona y tipo (APP, WEB): al abrir la siguiente se cierra la más vieja. */
+    public static final int MAX_SESSIONS_PER_KIND = 2;
+
+    /** Cierra las sesiones activas de ese tipo más allá de las {@value #MAX_SESSIONS_PER_KIND} más recientes (no cuenta las de "Ver como"). */
+    void revokeBeyondLimit(UUID userId, String kind, Instant now) {
+        jdbc.sql("""
+                        UPDATE auth_session SET revoked_at = :now WHERE id IN (
+                            SELECT id FROM auth_session
+                             WHERE user_account_id = :u AND kind = :k AND revoked_at IS NULL AND expires_at > :now AND view_as_business_id IS NULL
+                             ORDER BY issued_at DESC, id OFFSET :keep)
+                        """)
+                .param("now", Timestamp.from(now)).param("u", userId).param("k", kind).param("keep", MAX_SESSIONS_PER_KIND).update();
+    }
+
+    /** "Cerrar todas mis sesiones": revoca todas las del usuario salvo la actual. Devuelve cuántas cerró. */
+    public int revokeAllExcept(UUID userId, UUID currentSessionId) {
+        return jdbc.sql("UPDATE auth_session SET revoked_at = :now WHERE user_account_id = :u AND revoked_at IS NULL AND id <> :s")
+                .param("now", Timestamp.from(clock.instant())).param("u", userId).param("s", currentSessionId).update();
     }
 
     /** Duración de la sesión de la consola con contraseña: una jornada (la consola exige además una sesión de menos de 12 h). */
@@ -113,6 +134,7 @@ public class AuthService {
         Instant expires = now.plus(PLATFORM_SESSION_TTL);
         jdbc.sql("INSERT INTO auth_session (id, user_account_id, token_hash, kind, user_agent, issued_at, last_seen_at, expires_at) VALUES (:id, :u, :h, 'WEB', :ua, :now, :now, :exp)")
                 .param("id", UUID.randomUUID()).param("u", userId).param("h", TokenHasher.hash(token)).param("ua", userAgent).param("now", Timestamp.from(now)).param("exp", Timestamp.from(expires)).update();
+        revokeBeyondLimit(userId, "WEB", now);
         jdbc.sql("INSERT INTO platform_audit_log (actor_user_id, action, target, payload) VALUES (:u, 'platform.login', NULL, 'usuario y contraseña')").param("u", userId).update();
         return new LoginResult(token, expires, userId);
     }

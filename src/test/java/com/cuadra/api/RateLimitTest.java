@@ -12,7 +12,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.TestPropertySource;
 
 /** Límites de peticiones por minuto: públicos por IP, el resto por credencial. */
-@TestPropertySource(properties = {"cuadra.rate-limit.enabled=true", "cuadra.rate-limit.auth-per-minute=3", "cuadra.rate-limit.invitation-per-minute=3",
+@TestPropertySource(properties = {"cuadra.rate-limit.enabled=true", "cuadra.rate-limit.auth-per-minute=3",
         "cuadra.rate-limit.link-create-per-minute=2", "cuadra.rate-limit.credential-per-minute=5"})
 class RateLimitTest extends ApiTestBase {
     private static final String BAD = "{\"idToken\":\"mal\"}";
@@ -29,9 +29,10 @@ class RateLimitTest extends ApiTestBase {
     }
 
     @Test
-    void guessingInvitationCodesIsLimited() throws Exception {
-        for (int i = 0; i < 3; i++) mvc.perform(get("/api/invitations/NOEXISTE" + i).with(r -> { r.setRemoteAddr("10.1.1.1"); return r; })).andExpect(status().isNotFound());
-        mvc.perform(get("/api/invitations/NOEXISTE9").with(r -> { r.setRemoteAddr("10.1.1.1"); return r; })).andExpect(status().isTooManyRequests());
+    void guessingPinsFromOneAddressIsLimited() throws Exception {
+        String body = "{\"businessCode\":\"12345\",\"username\":\"Kevin\",\"pin\":\"11111\"}";
+        for (int i = 0; i < 3; i++) mvc.perform(post("/api/auth/member-login").with(r -> { r.setRemoteAddr("10.1.1.1"); return r; }).contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isUnauthorized());
+        mvc.perform(post("/api/auth/member-login").with(r -> { r.setRemoteAddr("10.1.1.1"); return r; }).contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isTooManyRequests());
     }
 
     @Test

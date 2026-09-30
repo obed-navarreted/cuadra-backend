@@ -62,6 +62,28 @@ public class BusinessController {
         return businesses.update(businessId, ctx.memberId(), ctx.userId(), body);
     }
 
+    public record AccessCodeView(String accessCode) {}
+
+    public record SetAccessCode(@jakarta.validation.constraints.NotBlank String accessCode) {}
+
+    /** Renueva el código del negocio (solo el dueño). */
+    @PostMapping("/b/{businessId}/access-code")
+    public AccessCodeView regenerateAccessCode(@AuthenticationPrincipal Actor actor, @PathVariable UUID businessId,
+                                               @RequestHeader(value = Access.MEMBER_HEADER, required = false) UUID memberId) {
+        MemberContext ctx = access.member(actor, businessId, memberId);
+        ctx.require(Permission.EDIT_BUSINESS);
+        return new AccessCodeView(businesses.regenerateAccessCode(businessId, ctx.memberId(), ctx.userId()));
+    }
+
+    /** Cambia el código por uno elegido (5 dígitos, libre). */
+    @org.springframework.web.bind.annotation.PutMapping("/b/{businessId}/access-code")
+    public AccessCodeView setAccessCode(@AuthenticationPrincipal Actor actor, @PathVariable UUID businessId,
+                                        @RequestHeader(value = Access.MEMBER_HEADER, required = false) UUID memberId, @jakarta.validation.Valid @org.springframework.web.bind.annotation.RequestBody SetAccessCode body) {
+        MemberContext ctx = access.member(actor, businessId, memberId);
+        ctx.require(Permission.EDIT_BUSINESS);
+        return new AccessCodeView(businesses.setAccessCode(businessId, ctx.memberId(), ctx.userId(), body.accessCode()));
+    }
+
     @DeleteMapping("/b/{businessId}")
     @ResponseStatus(HttpStatus.ACCEPTED)
     public void delete(@AuthenticationPrincipal Actor actor, @PathVariable UUID businessId,

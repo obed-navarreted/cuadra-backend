@@ -37,4 +37,20 @@ class PlatformPasswordTest extends ApiTestBase {
         // Otro usuario (el real) no se ve afectado por los intentos ajenos.
         attempt("root", "Prueba#Segura1").andExpect(status().isOk());
     }
+
+    @Test
+    void thirdConsoleSessionClosesTheOldest() throws Exception {
+        String[] t = new String[3];
+        for (int i = 0; i < 3; i++) {
+            Thread.sleep(5);
+            t[i] = JsonPath.read(attempt("root", "Prueba#Segura1").andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), "$.token");
+        }
+        call(get("/api/me"), bearer(t[0]), null).andExpect(status().isUnauthorized());
+        call(get("/api/me"), bearer(t[1]), null).andExpect(status().isOk());
+        call(get("/api/me"), bearer(t[2]), null).andExpect(status().isOk());
+        // "Cerrar todas mis sesiones" deja solo la actual.
+        call(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/me/sessions/revoke-all"), bearer(t[2]), null).andExpect(status().isOk());
+        call(get("/api/me"), bearer(t[1]), null).andExpect(status().isUnauthorized());
+        call(get("/api/me"), bearer(t[2]), null).andExpect(status().isOk());
+    }
 }

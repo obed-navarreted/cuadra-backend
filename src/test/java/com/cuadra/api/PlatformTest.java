@@ -91,7 +91,7 @@ class PlatformTest extends ApiTestBase {
         call(get("/api/me"), bearer(viewer), null).andExpect(status().isOk()).andExpect(jsonPath("$.platformAdmin", is(false)))
                 .andExpect(jsonPath("$.viewAsBusinessId", is(biz.toString()))).andExpect(jsonPath("$.businesses", hasSize(1))).andExpect(jsonPath("$.businesses[0].role", is("OWNER")));
         // …pero no escribe, ni mira otro negocio, ni entra a la consola.
-        assertCode(call(post(b(biz) + "/members"), bearer(viewer), "{\"displayName\":\"X\",\"role\":\"CASHIER\",\"pin\":\"1234\"}").andExpect(status().isForbidden()), "VIEW_AS_READ_ONLY");
+        assertCode(call(post(b(biz) + "/members"), bearer(viewer), "{\"displayName\":\"X\",\"role\":\"CASHIER\",\"pin\":\"12345\"}").andExpect(status().isForbidden()), "VIEW_AS_READ_ONLY");
         assertCode(call(put("/api/me"), bearer(viewer), "{\"fullName\":\"Hack\"}").andExpect(status().isForbidden()), "VIEW_AS_READ_ONLY");
         call(get(b(other) + "/plan"), bearer(viewer), null).andExpect(status().isNotFound());
         call(get("/api/platform/metrics"), bearer(viewer), null).andExpect(status().isNotFound());
@@ -121,7 +121,7 @@ class PlatformTest extends ApiTestBase {
         call(get(b(biz) + "/plan"), bearer(owner), null).andExpect(jsonPath("$.plan", is("FREE")));
         call(post("/api/platform/businesses/" + biz + "/extend-trial"), bearer(root), "{\"days\":15,\"reason\":\"pidió más tiempo\"}").andExpect(status().isOk())
                 .andExpect(jsonPath("$.effectivePlan", is("PRO"))).andExpect(jsonPath("$.planStatus", is("TRIALING")));
-        call(get(b(biz) + "/plan"), bearer(owner), null).andExpect(jsonPath("$.trialDaysLeft", greaterThanOrEqualTo(43)));
+        call(get(b(biz) + "/plan"), bearer(owner), null).andExpect(jsonPath("$.trialDaysLeft", greaterThanOrEqualTo(14)));
         call(post("/api/platform/businesses/" + biz + "/extend-trial"), bearer(root), "{\"days\":0,\"reason\":\"pidió más tiempo\"}").andExpect(status().isBadRequest());
         // El dueño ve el cambio en su actividad.
         call(get(b(biz) + "/activity"), bearer(owner), null).andExpect(jsonPath("$.items[?(@.action=='platform.trial_extended')]", hasSize(1)));
@@ -135,9 +135,9 @@ class PlatformTest extends ApiTestBase {
         UUID biz = createBusiness(owner, "Pulpería Zafiro");
         String root = admin();
         call(get("/api/platform/businesses?q=zafiro"), bearer(root), null).andExpect(jsonPath("$.items", hasSize(1))).andExpect(jsonPath("$.items[0].id", is(biz.toString())))
-                .andExpect(jsonPath("$.items[0].effectivePlan", is("PRO")));
+                .andExpect(jsonPath("$.items[0].effectivePlan", is("FREE")));
         call(get("/api/platform/businesses?q=plt-e@test"), bearer(root), null).andExpect(jsonPath("$.items", hasSize(1)));
-        call(get("/api/platform/businesses?q=zafiro&plan=FREE"), bearer(root), null).andExpect(jsonPath("$.items", hasSize(0)));
+        call(get("/api/platform/businesses?q=zafiro&plan=PRO"), bearer(root), null).andExpect(jsonPath("$.items", hasSize(0)));
         call(get("/api/platform/businesses/" + biz), bearer(root), null).andExpect(jsonPath("$.owners[0].email", is("plt-e@test.com"))).andExpect(jsonPath("$.members", is(1)));
         call(get("/api/platform/users?q=plt-e@"), bearer(root), null).andExpect(jsonPath("$", hasSize(1))).andExpect(jsonPath("$[0].businesses[0]", containsString("Pulpería Zafiro")));
         call(get("/api/platform/users"), bearer(root), null).andExpect(jsonPath("$", hasSize(0)));
@@ -160,7 +160,7 @@ class PlatformTest extends ApiTestBase {
         createBusiness(owner, "Métrica");
         String root = admin();
         call(get("/api/platform/metrics"), bearer(root), null).andExpect(status().isOk()).andExpect(jsonPath("$.createdLast7", greaterThanOrEqualTo(1)))
-                .andExpect(jsonPath("$.byCountry[?(@.key=='NI')]", hasSize(1))).andExpect(jsonPath("$.byPlan[?(@.key=='PRO:TRIALING')]", hasSize(1)))
+                .andExpect(jsonPath("$.byCountry[?(@.key=='NI')]", hasSize(1))).andExpect(jsonPath("$.byPlan[?(@.key=='FREE:MANUAL')]", hasSize(1)))
                 .andExpect(jsonPath("$.moduleUsage[?(@.key=='credit')]", hasSize(1))).andExpect(jsonPath("$.retention", notNullValue()));
     }
 
@@ -171,7 +171,7 @@ class PlatformTest extends ApiTestBase {
         String root = admin();
         call(put("/api/platform/config"), bearer(root), "{\"key\":\"jwt_secret\",\"value\":\"x\",\"reason\":\"prueba mala\"}").andExpect(status().isBadRequest());
         call(put("/api/platform/config"), bearer(root), "{\"key\":\"min_app_version\",\"value\":\"abc\",\"reason\":\"prueba mala\"}").andExpect(status().isBadRequest());
-        call(put("/api/platform/config"), bearer(root), "{\"key\":\"donation_url\",\"value\":\"javascript:alert(1)\",\"reason\":\"prueba mala\"}").andExpect(status().isBadRequest());
+        call(put("/api/platform/config"), bearer(root), "{\"key\":\"support_whatsapp\",\"value\":\"javascript:alert(1)\",\"reason\":\"prueba mala\"}").andExpect(status().isBadRequest());
         call(put("/api/platform/config"), bearer(root), "{\"key\":\"min_app_version\",\"value\":\"1.4.0\",\"reason\":\"corrige un error\"}").andExpect(status().isOk());
         call(put("/api/platform/config"), bearer(root), "{\"key\":\"recommended_app_version\",\"value\":\"1.5.0\",\"reason\":\"nueva versión\"}").andExpect(status().isOk());
         mvc.perform(get("/api/config")).andExpect(status().isOk()).andExpect(jsonPath("$.minAppVersion", is("1.4.0"))).andExpect(jsonPath("$.recommendedAppVersion", is("1.5.0")));
@@ -217,7 +217,7 @@ class PlatformTest extends ApiTestBase {
         String none = announce(root, "{\"title\":\"Solo CR\",\"body\":\"Hola\",\"audience\":\"ALL\",\"segment\":{\"countries\":[\"CR\"],\"businessIds\":[\"" + biz + "\"]}}");
         assertEquals(0, (int) JsonPath.read(none, "$.recipients"));
         // Segmento por plan.
-        String pro = announce(root, "{\"title\":\"Solo Free\",\"body\":\"Hola\",\"audience\":\"OWNERS\",\"segment\":{\"plans\":[\"FREE\"],\"businessIds\":[\"" + biz + "\"]}}");
+        String pro = announce(root, "{\"title\":\"Solo Free\",\"body\":\"Hola\",\"audience\":\"OWNERS\",\"segment\":{\"plans\":[\"PRO\"],\"businessIds\":[\"" + biz + "\"]}}");
         assertEquals(0, (int) JsonPath.read(pro, "$.recipients"));
         // Cuántos recibirían, antes de enviar.
         call(post("/api/platform/announcements/reach"), bearer(root), "{\"audience\":\"ALL\",\"segment\":{\"businessIds\":[\"" + biz + "\"]}}")

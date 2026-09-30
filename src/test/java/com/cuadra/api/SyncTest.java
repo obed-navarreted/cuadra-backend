@@ -87,8 +87,10 @@ class SyncTest extends ApiTestBase {
         String old = SaleTest.sale("PARKED", SaleTest.item("Cuajada", 1000, 1000), "", "");
         asDevice(post("/api/b/" + b + "/sync/push"), device, member, push(op(UUID.randomUUID(), "SALE_UPSERT", sale, old)))
                 .andExpect(jsonPath("$.results[0].status", is("STALE")));
-        asDevice(post("/api/b/" + b + "/sync/push"), device, member, push(op(UUID.randomUUID(), "SALE_CANCEL", sale, "{\"reason\":\"x\"}")))
-                .andExpect(jsonPath("$.results[0].code", is("FORBIDDEN")));   // un cajero no puede cancelar una cobrada
+        // (El teléfono se vinculó hoy: la fecha vieja de la venta es imposible y se tomó la del servidor. Se la envejece para la prueba.)
+        baseJdbc.sql("UPDATE sale SET completed_at = now() - interval '1 hour' WHERE id = :s").param("s", sale).update();
+        asDevice(post("/api/b/" + b + "/sync/push"), device, member, push(op(UUID.randomUUID(), "SALE_CANCEL", sale, "{\"reason\":\"me equivoqué\"}")))
+                .andExpect(jsonPath("$.results[0].code", is("UNDO_NOT_ALLOWED")));   // un cajero no puede cancelar una cobrada (salvo su última, en los primeros minutos)
     }
 
     @Test

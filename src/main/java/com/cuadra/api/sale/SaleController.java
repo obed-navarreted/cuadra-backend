@@ -26,11 +26,24 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/b/{businessId}/sales")
 public class SaleController {
     private final SaleService sales;
+    private final ReturnService returns;
     private final Access access;
 
-    public SaleController(SaleService sales, Access access) {
+    public SaleController(SaleService sales, ReturnService returns, Access access) {
         this.sales = sales;
+        this.returns = returns;
         this.access = access;
+    }
+
+    /** Devolver productos de una venta cobrada. Idempotente por `returnId` (lo genera quien la hace): repetirla devuelve la misma. */
+    @PutMapping("/{saleId}/returns/{returnId}")
+    public ResponseEntity<ReturnService.ReturnView> createReturn(@AuthenticationPrincipal Actor actor, @PathVariable UUID businessId, @PathVariable UUID saleId, @PathVariable UUID returnId,
+                                                                 @RequestHeader(value = Access.MEMBER_HEADER, required = false) UUID memberId,
+                                                                 @RequestBody ReturnService.ReturnInput body) {
+        MemberContext ctx = access.member(actor, businessId, memberId);
+        var in = new ReturnService.ReturnInput(saleId, body.items(), body.reason(), body.refundMethod(), body.occurredAt());
+        ReturnService.Result r = returns.create(ctx, returnId, in);
+        return ResponseEntity.status(r.created() ? HttpStatus.CREATED : HttpStatus.OK).body(r.ret());
     }
 
     public record CancelBody(String reason) {}

@@ -27,7 +27,7 @@ class AuthzSweepTest extends ApiTestBase {
 
     private record Route(HttpMethod method, String pattern) {}
 
-    private static final List<String> PUBLIC = List.of("POST /api/auth/google", "POST /api/auth/platform", "GET /api/config", "GET /api/invitations/{code}", "POST /api/devices/link-requests", "GET /api/devices/link-requests/{code}");
+    private static final List<String> PUBLIC = List.of("POST /api/auth/google", "POST /api/auth/platform", "POST /api/auth/member-login", "GET /api/config", "GET /api/config/countries", "POST /api/devices/link-requests", "GET /api/devices/link-requests/{code}");
 
     private List<Route> routes(String prefix) {
         List<Route> out = new ArrayList<>();

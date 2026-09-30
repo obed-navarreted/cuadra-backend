@@ -110,6 +110,7 @@ public class CreditService {
         Optional<Row> existing = lock(ctx.businessId(), id);
         if (existing.isEmpty()) {
             if (jdbc.sql("SELECT count(*) FROM credit WHERE id = :id").param("id", id).query(Integer.class).single() > 0) throw ApiException.conflict("ID_TAKEN", "Id already in use");
+            requireWithinLimit(ctx.businessId(), in.customerId(), in.amountMinor());
             jdbc.sql("""
                             INSERT INTO credit (id, business_id, customer_id, debtor_label, debtor_phone_e164, amount_minor, balance_minor, due_date, note,
                                                 created_by_member_id, device_id, created_at)
@@ -130,6 +131,11 @@ public class CreditService {
         if (sameAmount && label.equals(current.debtorLabel()) && java.util.Objects.equals(phone, current.debtorPhone()) && java.util.Objects.equals(in.customerId(), current.customerId())
                 && java.util.Objects.equals(note, current.note())) {
             return new Result(current, Outcome.UNCHANGED);
+        }
+        // Subir el monto (o pasarlo a otro cliente) también respeta el límite de crédito del cliente.
+        if ("OPEN".equals(c.status)) {
+            boolean sameCustomer = java.util.Objects.equals(in.customerId(), c.customerId);
+            requireWithinLimit(ctx.businessId(), in.customerId(), sameCustomer ? in.amountMinor() - c.amount : c.balance + (in.amountMinor() - c.amount));
         }
         jdbc.sql("""
                         UPDATE credit SET customer_id = :c, debtor_label = :label, debtor_phone_e164 = :phone, amount_minor = :amt, note = :note,
@@ -152,6 +158,16 @@ public class CreditService {
     public void syncSaleCredits(MemberContext ctx, UUID saleId, List<SaleCredit> wanted, Instant completedAt) {
         Set<UUID> keep = new LinkedHashSet<>();
         Set<UUID> touchedCustomers = new LinkedHashSet<>();
+        // Límite de crédito: lo que esta venta AGREGA a la deuda de cada cliente (un fiado nuevo, o lo que sube uno existente), antes de tocar nada.
+        Map<UUID, Long> added = new java.util.LinkedHashMap<>();
+        for (SaleCredit sc : wanted) {
+            if (sc.customerId() == null) continue;
+            Optional<Row> prev = jdbc.sql("SELECT id, sale_id, customer_id, amount_minor, balance_minor, status FROM credit WHERE id = :id AND business_id = :b")
+                    .param("id", saleCreditId(saleId, sc.paymentId())).param("b", ctx.businessId()).query((rs, n) -> row(rs)).optional();
+            long before = prev.filter(r -> !"CANCELLED".equals(r.status) && sc.customerId().equals(r.customerId)).map(r -> r.amount).orElse(0L);
+            added.merge(sc.customerId(), sc.amountMinor() - before, Long::sum);
+        }
+        added.forEach((customer, extra) -> requireWithinLimit(ctx.businessId(), customer, extra));
         for (SaleCredit sc : wanted) {
             UUID id = saleCreditId(saleId, sc.paymentId());
             keep.add(id);
@@ -207,12 +223,67 @@ public class CreditService {
         for (UUID c : touched) customers.recompute(c);
     }
 
+    /** Lo que aún se debe de los fiados de una venta (para una devolución con nota de crédito). */
+    public long openBalanceOfSale(UUID businessId, UUID saleId) {
+        return jdbc.sql("SELECT coalesce(sum(balance_minor), 0) FROM credit WHERE sale_id = :s AND business_id = :b AND status = 'OPEN'")
+                .param("s", saleId).param("b", businessId).query(Long.class).single();
+    }
+
+    public record CreditNote(UUID creditId, long amountMinor) {}
+
+    /**
+     * Devolución con nota de crédito: baja el MONTO de los fiados abiertos de la venta (del más viejo al más nuevo), hasta `amountMinor`. Nunca por debajo
+     * de lo ya abonado (quien llama ya comprobó que no pasa del saldo). Queda un evento RETURN en la libreta.
+     */
+    public List<CreditNote> applyCreditNote(MemberContext ctx, UUID saleId, long amountMinor, UUID returnId) {
+        List<CreditNote> out = new ArrayList<>();
+        Set<UUID> touched = new LinkedHashSet<>();
+        long left = amountMinor;
+        for (Row c : jdbc.sql("SELECT id, sale_id, customer_id, amount_minor, balance_minor, status FROM credit WHERE sale_id = :s AND business_id = :b AND status = 'OPEN' AND balance_minor > 0 ORDER BY created_at, id FOR UPDATE")
+                .param("s", saleId).param("b", ctx.businessId()).query((rs, n) -> row(rs)).list()) {
+            if (left <= 0) break;
+            long take = Math.min(left, c.balance);
+            if (take >= c.amount) {
+                // Se devolvió todo lo fiado (sin abonos): el fiado queda cancelado (el monto no puede quedar en cero).
+                jdbc.sql("UPDATE credit SET status = 'CANCELLED', balance_minor = 0, rev = nextval('change_rev_seq') WHERE id = :id").param("id", c.id).update();
+            } else {
+                jdbc.sql("UPDATE credit SET amount_minor = amount_minor - :x, rev = nextval('change_rev_seq') WHERE id = :id").param("x", take).param("id", c.id).update();
+            }
+            recompute(c.id);
+            event(ctx.businessId(), c.id, c.customerId, "RETURN", "return=" + returnId + " amount=" + take, ctx.memberId());
+            if (c.customerId != null) touched.add(c.customerId);
+            out.add(new CreditNote(c.id, take));
+            left -= take;
+        }
+        for (UUID cu : touched) customers.recompute(cu);
+        return out;
+    }
+
     private void cancelCredit(MemberContext ctx, UUID creditId, Set<UUID> touchedCustomers) {
         Row c = lock(ctx.businessId(), creditId).orElseThrow();
         if (paid(creditId) > 0) throw ApiException.conflict("CREDIT_HAS_PAYMENTS", "Void the payments of this credit first");
         if (c.customerId != null) touchedCustomers.add(c.customerId);
         jdbc.sql("UPDATE credit SET status = 'CANCELLED', balance_minor = 0, rev = nextval('change_rev_seq') WHERE id = :id").param("id", creditId).update();
         event(ctx.businessId(), creditId, c.customerId, "CANCELLED_WITH_SALE", null, ctx.memberId());
+    }
+
+    /**
+     * Límite de crédito (Ajustes del negocio › «El límite bloquea»): con `credit_limit_enforced`, lo que el cliente ya debe más lo nuevo no puede pasar su
+     * límite. Es la misma regla que aplica la caja (`CreditRules`); aquí la hace cumplir también la web y dos teléfonos sin conexión. Una venta sin conexión
+     * que la rebasa se RECHAZA con los datos para explicarlo; el teléfono la conserva en «Requiere atención» (no se pierde).
+     */
+    void requireWithinLimit(UUID businessId, UUID customerId, long extraMinor) {
+        if (customerId == null || extraMinor <= 0) return;
+        if (!jdbc.sql("SELECT credit_limit_enforced FROM business WHERE id = :b").param("b", businessId).query(Boolean.class).single()) return;
+        var c = jdbc.sql("SELECT credit_limit_minor, balance_minor, name FROM customer WHERE id = :c AND business_id = :b").param("c", customerId).param("b", businessId)
+                .query((rs, n) -> new Object[] {rs.getObject("credit_limit_minor"), rs.getLong("balance_minor"), rs.getString("name")}).optional().orElse(null);
+        if (c == null || c[0] == null) return;
+        long limit = ((Number) c[0]).longValue();
+        long balance = (Long) c[1];
+        if (balance + extraMinor > limit) {
+            throw ApiException.conflict("CREDIT_LIMIT_EXCEEDED", "This credit goes over the customer's limit")
+                    .with("limitMinor", limit).with("balanceMinor", balance).with("amountMinor", extraMinor).with("customerName", c[2]);
+        }
     }
 
     // ---------- abonos ----------
@@ -239,21 +310,35 @@ public class CreditService {
         List<UUID> created = new ArrayList<>();
         Set<UUID> touchedCustomers = new LinkedHashSet<>();
 
+        UUID payCustomer = in.customerId();
+        UUID redirectedFrom = null;
         if (in.creditId() != null) {
+            Row closed = lock(ctx.businessId(), in.creditId()).orElseThrow(() -> ApiException.notFound("CREDIT_NOT_FOUND", "Credit not found"));
+            if (closed.status.equals("CANCELLED") || closed.status.equals("WRITTEN_OFF")) {
+                // "Nunca se rechaza un abono: el dinero ya se recibió." El fiado se condonó o anuló en otro teléfono mientras este cobraba sin conexión:
+                // el abono va a las OTRAS deudas abiertas del mismo cliente (de la más vieja a la más nueva). Sin cliente o sin otras deudas no hay dónde
+                // ponerlo (no existe "saldo a favor"): se rechaza con un código claro y el teléfono lo conserva en «Requiere atención».
+                if (closed.customerId == null || !hasOpenCredits(ctx.businessId(), closed.customerId)) {
+                    throw ApiException.conflict("CREDIT_CLOSED", "This credit is closed").with("creditStatus", closed.status);
+                }
+                payCustomer = closed.customerId;
+                redirectedFrom = closed.id;
+            }
+        }
+        if (in.creditId() != null && redirectedFrom == null) {
             Row c = lock(ctx.businessId(), in.creditId()).orElseThrow(() -> ApiException.notFound("CREDIT_NOT_FOUND", "Credit not found"));
-            if (c.status.equals("CANCELLED") || c.status.equals("WRITTEN_OFF")) throw ApiException.conflict("CREDIT_CLOSED", "This credit is closed");
             insertPayment(ctx, id, c.id, c.customerId, null, in.amountMinor(), method, reference, at);
             created.add(id);
             if (in.amountMinor() > c.balance) event(ctx.businessId(), c.id, c.customerId, "OVERPAYMENT_REVIEW", "excess=" + (in.amountMinor() - c.balance), ctx.memberId());
             recompute(c.id);
             if (c.customerId != null) touchedCustomers.add(c.customerId);
         } else {
-            customers.get(ctx.businessId(), in.customerId());
+            customers.get(ctx.businessId(), payCustomer);
             List<Row> open = jdbc.sql("""
                             SELECT id, sale_id, customer_id, amount_minor, balance_minor, status FROM credit
                              WHERE customer_id = :c AND business_id = :b AND status = 'OPEN' AND balance_minor > 0 ORDER BY created_at, id FOR UPDATE
                             """)
-                    .param("c", in.customerId()).param("b", ctx.businessId()).query((rs, n) -> row(rs)).list();
+                    .param("c", payCustomer).param("b", ctx.businessId()).query((rs, n) -> row(rs)).list();
             if (open.isEmpty()) throw ApiException.conflict("NO_OPEN_CREDITS", "This customer owes nothing");
             long remaining = in.amountMinor();
             UUID lastChild = null;
@@ -261,7 +346,7 @@ public class CreditService {
                 if (remaining == 0) break;
                 long take = Math.min(remaining, c.balance);
                 UUID child = UUID.nameUUIDFromBytes(("pay:" + id + ":" + c.id).getBytes(StandardCharsets.UTF_8));
-                insertPayment(ctx, child, c.id, in.customerId(), id, take, method, reference, at);
+                insertPayment(ctx, child, c.id, payCustomer, id, take, method, reference, at);
                 created.add(child);
                 lastChild = child;
                 remaining -= take;
@@ -269,14 +354,20 @@ public class CreditService {
             if (remaining > 0 && lastChild != null) {
                 jdbc.sql("UPDATE credit_payment SET amount_minor = amount_minor + :x WHERE id = :id").param("x", remaining).param("id", lastChild).update();
                 UUID lastCredit = jdbc.sql("SELECT credit_id FROM credit_payment WHERE id = :id").param("id", lastChild).query(UUID.class).single();
-                event(ctx.businessId(), lastCredit, in.customerId(), "OVERPAYMENT_REVIEW", "excess=" + remaining, ctx.memberId());
+                event(ctx.businessId(), lastCredit, payCustomer, "OVERPAYMENT_REVIEW", "excess=" + remaining, ctx.memberId());
             }
             for (UUID child : created) recompute(jdbc.sql("SELECT credit_id FROM credit_payment WHERE id = :id").param("id", child).query(UUID.class).single());
-            touchedCustomers.add(in.customerId());
+            touchedCustomers.add(payCustomer);
+            if (redirectedFrom != null) event(ctx.businessId(), redirectedFrom, payCustomer, "PAYMENT_REDIRECTED", "payment=" + id + " amount=" + in.amountMinor(), ctx.memberId());
         }
         for (UUID c : touchedCustomers) customers.recompute(c);
         audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "credit.payment", "credit_payment", id, "amount=" + in.amountMinor());
         return resultFor(ctx.businessId(), created, true);
+    }
+
+    private boolean hasOpenCredits(UUID businessId, UUID customerId) {
+        return jdbc.sql("SELECT count(*) FROM credit WHERE customer_id = :c AND business_id = :b AND status = 'OPEN' AND balance_minor > 0")
+                .param("c", customerId).param("b", businessId).query(Integer.class).single() > 0;
     }
 
     private void insertPayment(MemberContext ctx, UUID id, UUID creditId, UUID customerId, UUID groupId, long amount, String method, String reference, Instant at) {

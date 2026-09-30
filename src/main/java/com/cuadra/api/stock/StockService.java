@@ -145,6 +145,19 @@ public class StockService {
         insert(ctx.businessId(), id, productId, kind, quantityMilli, unitCostMinor, refType, refId, null, ctx.memberId(), ctx.deviceId(), at);
     }
 
+    /**
+     * Devolución de una venta: vuelve la existencia de lo devuelto, enlazada a la devolución (`SALE_RETURN`). Solo si el producto lleva inventario y la
+     * venta ya la había descontado (se vendió después de que se empezó a contar); id determinista: repetirla no suma dos veces.
+     */
+    public void recordReturn(MemberContext ctx, UUID id, UUID productId, long quantityMilli, UUID saleId, UUID returnId, Instant saleCompletedAt, Instant at) {
+        var p = jdbc.sql("SELECT track_stock, stock_tracked_since FROM product WHERE id = :p AND business_id = :b").param("p", productId).param("b", ctx.businessId())
+                .query((rs, n) -> new Object[] {rs.getBoolean(1), rs.getTimestamp(2)}).optional().orElse(null);
+        if (p == null || !(Boolean) p[0] || p[1] == null || saleCompletedAt.isBefore(((Timestamp) p[1]).toInstant())) return;
+        lockProduct(ctx.businessId(), productId);
+        if (jdbc.sql("SELECT count(*) FROM stock_movement WHERE id = :id").param("id", id).query(Integer.class).single() > 0) return;
+        insert(ctx.businessId(), id, productId, "RETURN", quantityMilli, null, "SALE_RETURN", returnId, null, ctx.memberId(), ctx.deviceId(), at);
+    }
+
     private void insert(UUID businessId, UUID id, UUID productId, String kind, long qty, Long unitCost, String refType, UUID refId, String note,
                         UUID memberId, UUID deviceId, Instant at) {
         long before = jdbc.sql("SELECT stock_milli FROM product WHERE id = :p").param("p", productId).query(Long.class).single();

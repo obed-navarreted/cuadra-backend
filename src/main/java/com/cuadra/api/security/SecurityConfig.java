@@ -22,7 +22,6 @@ public class SecurityConfig {
                                            @Value("${cuadra.rate-limit.enabled:true}") boolean rateLimit,
                                            @Value("${cuadra.rate-limit.trust-forwarded-for:false}") boolean trustForwardedFor,
                                            @Value("${cuadra.rate-limit.auth-per-minute:20}") int authPerMinute,
-                                           @Value("${cuadra.rate-limit.invitation-per-minute:30}") int invitationPerMinute,
                                            @Value("${cuadra.rate-limit.link-create-per-minute:10}") int linkCreatePerMinute,
                                            @Value("${cuadra.rate-limit.link-poll-per-minute:90}") int linkPollPerMinute,
                                            @Value("${cuadra.rate-limit.credential-per-minute:900}") int credentialPerMinute,
@@ -49,9 +48,8 @@ public class SecurityConfig {
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(a -> a
                         .requestMatchers("/actuator/health/**", "/actuator/info").permitAll()
-                        .requestMatchers(HttpMethod.POST, "/api/auth/google", "/api/auth/platform").permitAll()
-                        .requestMatchers(HttpMethod.GET, "/api/config").permitAll()
-                        .requestMatchers(HttpMethod.GET, "/api/invitations/*").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/auth/google", "/api/auth/platform", "/api/auth/member-login").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/config", "/api/config/countries").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/devices/link-requests").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/devices/link-requests/*").permitAll()
                         .anyRequest().authenticated())
@@ -62,7 +60,7 @@ public class SecurityConfig {
                 .addFilterBefore(new AuthTokenFilter(store), UsernamePasswordAuthenticationFilter.class)
                 .addFilterBefore(new RequestSizeFilter(maxRequestBytes), AuthTokenFilter.class);
         if (rateLimit) {
-            http.addFilterBefore(new RateLimitFilter(clock, new RateLimitFilter.Limits(authPerMinute, invitationPerMinute, linkCreatePerMinute, linkPollPerMinute, credentialPerMinute), trustForwardedFor), RequestSizeFilter.class);
+            http.addFilterBefore(new RateLimitFilter(clock, new RateLimitFilter.Limits(authPerMinute, linkCreatePerMinute, linkPollPerMinute, credentialPerMinute), trustForwardedFor), RequestSizeFilter.class);
         }
         return http.build();
     }

@@ -58,6 +58,8 @@ cuadra:
     client-ids: ${GOOGLE_CLIENT_IDS:}
   support:
     inbox-email: ${SUPPORT_INBOX_EMAIL:ndiazobed@gmail.com}
+    # WhatsApp de contacto y de apoyo (solo dígitos con código de país). Editable sin lanzar versión desde la consola (`support_whatsapp`).
+    whatsapp: ${SUPPORT_WHATSAPP:50582724138}
   platform:
     admin-emails: ${PLATFORM_ADMIN_EMAILS:ndiazobed@gmail.com}
     # Acceso con usuario y contraseña a la consola. SOLO el hash bcrypt, y solo por entorno (nunca escribirlos aquí).
@@ -66,9 +68,6 @@ cuadra:
   app:
     base-url: ${APP_BASE_URL:http://localhost:5173}
     min-app-version: ${MIN_APP_VERSION:0}
-    # Donaciones por PayPal (enlace externo; la app de Google Play NO lo muestra: política de pagos). Se puede cambiar u ocultar desde la consola.
-    donation-url: ${DONATION_URL:https://www.paypal.com/donate/?business=ndiazobed%40gmail.com&currency_code=USD&item_name=Apoyo+a+Cuadra}
-    donation-mode: ${DONATION_MODE:external_link}
 
 logging:
   level:

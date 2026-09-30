@@ -76,11 +76,14 @@ class ReportTest extends ApiTestBase {
         // Una venta eliminada no cuenta.
         UUID gone = sale(owner, b, item(a, "Queso", 10000, 6000L, 1000), SaleTest.pay("CASH", 10000, ""), d21, 0);
         call(post(base(b) + "/sales/" + gone + "/cancel"), bearer(owner), "{\"reason\":\"error de cobro\"}").andExpect(status().isOk());
+        // Anulada ese mismo día (una anulación de OTRO día seguiría contando en el suyo y restaría en el de la anulación).
+        jdbc.sql("UPDATE sale SET cancelled_at = completed_at + interval '1 hour' WHERE id = :s").param("s", gone).update();
         expense(owner, b, 2000, "CASH_DRAWER", category(owner, b, "utilities"), d20);
         expense(owner, b, 8000, "BANK", category(owner, b, "rent"), d21);
         expense(owner, b, 4000, "CASH_DRAWER", category(owner, b, "goods"), d21);
         UUID voided = expense(owner, b, 999, "OTHER", category(owner, b, "other"), d21);
         call(post(base(b) + "/expenses/" + voided + "/void"), bearer(owner), "{}").andExpect(status().isOk());
+        jdbc.sql("UPDATE expense SET voided_at = occurred_at + interval '1 hour' WHERE id = :e").param("e", voided).update();
         return b;
     }
 

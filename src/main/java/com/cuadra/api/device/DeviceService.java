@@ -3,6 +3,7 @@ package com.cuadra.api.device;
 import com.cuadra.api.common.ApiException;
 import com.cuadra.api.common.Audit;
 import com.cuadra.api.security.TokenHasher;
+import com.cuadra.api.tenancy.Role;
 import com.cuadra.api.tenancy.MemberContext;
 import com.cuadra.api.tenancy.Role.Permission;
 import java.sql.Timestamp;
@@ -21,14 +22,23 @@ import org.springframework.transaction.annotation.Transactional;
  */
 @Service
 public class DeviceService {
+    /** Teléfonos personales activos por persona (entrando con código del negocio, usuario y PIN). */
+    public static final int MAX_PERSONAL_PHONES = 2;
     private static final Duration LINK_TTL = Duration.ofMinutes(10);
 
     private final JdbcClient jdbc;
     private final Audit audit;
     private final Clock clock;
     private final com.cuadra.api.plan.PlanService plans;
+    private final org.springframework.security.crypto.password.PasswordEncoder pinEncoder;
+    private final com.cuadra.api.notification.NotificationService notifications;
+    private final String dummyPinHash;
 
-    public DeviceService(JdbcClient jdbc, Audit audit, Clock clock, com.cuadra.api.plan.PlanService plans) {
+    public DeviceService(JdbcClient jdbc, Audit audit, Clock clock, com.cuadra.api.plan.PlanService plans, org.springframework.security.crypto.password.PasswordEncoder pinEncoder,
+                         com.cuadra.api.notification.NotificationService notifications) {
+        this.pinEncoder = pinEncoder;
+        this.notifications = notifications;
+        this.dummyPinHash = pinEncoder.encode(UUID.randomUUID().toString());
         this.jdbc = jdbc;
         this.audit = audit;
         this.clock = clock;
@@ -111,10 +121,10 @@ public class DeviceService {
         UUID deviceId = UUID.randomUUID();
         String token = TokenHasher.newToken();
         jdbc.sql("""
-                        INSERT INTO device (id, business_id, kind, name, model, os_version, app_version, token_hash, cash_register_id, linked_by_member_id)
-                        VALUES (:id, :b, 'SHARED', :n, :m, :o, :a, :h, :r, :by)
+                        INSERT INTO device (id, business_id, kind, name, model, os_version, app_version, token_hash, cash_register_id, linked_by_member_id, trust_role)
+                        VALUES (:id, :b, 'SHARED', :n, :m, :o, :a, :h, :r, :by, :trust)
                         """)
-                .param("id", deviceId).param("b", ctx.businessId())
+                .param("id", deviceId).param("b", ctx.businessId()).param("trust", ctx.role().name())
                 .param("n", name == null || name.isBlank() ? req[0] : name.trim()).param("m", req[1]).param("o", req[2]).param("a", req[3])
                 .param("h", TokenHasher.hash(token)).param("r", register).param("by", ctx.memberId()).update();
         jdbc.sql("UPDATE device_link_request SET device_id = :d, pending_token = :t, claimed_at = :now WHERE code = :c")
@@ -139,13 +149,86 @@ public class DeviceService {
         UUID deviceId = UUID.randomUUID();
         String token = TokenHasher.newToken();
         jdbc.sql("""
-                        INSERT INTO device (id, business_id, kind, name, model, os_version, app_version, token_hash, cash_register_id, linked_by_member_id)
-                        VALUES (:id, :b, 'SHARED', :n, :m, :o, :a, :h, :r, :by)
+                        INSERT INTO device (id, business_id, kind, name, model, os_version, app_version, token_hash, cash_register_id, linked_by_member_id, trust_role)
+                        VALUES (:id, :b, 'SHARED', :n, :m, :o, :a, :h, :r, :by, :trust)
                         """)
-                .param("id", deviceId).param("b", ctx.businessId()).param("n", info.deviceName()).param("m", info.model()).param("o", info.osVersion())
+                .param("id", deviceId).param("b", ctx.businessId()).param("trust", ctx.role().name()).param("n", info.deviceName()).param("m", info.model()).param("o", info.osVersion())
                 .param("a", info.appVersion()).param("h", TokenHasher.hash(token)).param("r", register, java.sql.Types.OTHER).param("by", ctx.memberId()).update();
         audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), null, "device.self_link", "device", deviceId, null);
         return new SelfLinked(deviceId, token, register);
+    }
+
+    public record MemberLoginRequest(String businessCode, String username, String pin, String deviceName, String model, String osVersion, String appVersion) {}
+
+    public record MemberLoginResult(UUID deviceId, String deviceToken, UUID businessId, UUID memberId, String memberName, String role, boolean pinMustChange) {}
+
+    private static final int MAX_PIN_FAILURES = 5;
+    private static final Duration PIN_LOCKOUT = Duration.ofMinutes(15);
+
+    /**
+     * Entrar con CÓDIGO DEL NEGOCIO + USUARIO (el nombre de la persona) + PIN, sin cuenta de Google: para admins y cajeros creados por el dueño.
+     * El teléfono queda vinculado al negocio y con el poder máximo de esa persona (un cajero solo actúa como cajero). El dueño entra con Google.
+     * Cualquier fallo (código, usuario o PIN) responde igual; 5 fallos seguidos bloquean a esa persona 15 minutos y avisan al dueño y a los admins.
+     */
+    // Los fallos también se guardan (contador y bloqueo de PIN): la excepción que corta la petición no debe deshacerlos.
+    @Transactional(noRollbackFor = ApiException.class)
+    public MemberLoginResult memberLogin(MemberLoginRequest in, String userAgent) {
+        String code = in.businessCode() == null ? "" : in.businessCode().replaceAll("[^A-Za-z0-9]", "").toUpperCase();
+        String username = in.username() == null ? "" : in.username().trim();
+        Instant now = clock.instant();
+        UUID businessId = jdbc.sql("SELECT id FROM business WHERE access_code = :c AND status = 'ACTIVE'").param("c", code).query(UUID.class).optional().orElse(null);
+        var member = businessId == null ? null : jdbc.sql("""
+                        SELECT id, display_name, role, pin_hash, pin_must_change, pin_failed_count, pin_locked_until
+                          FROM member WHERE business_id = :b AND lower(btrim(display_name)) = lower(btrim(:n)) AND status = 'ACTIVE' AND pin_hash IS NOT NULL
+                         ORDER BY created_at LIMIT 1 FOR UPDATE
+                        """)
+                .param("b", businessId).param("n", username)
+                .query((rs, n) -> new Object[] {rs.getObject("id", UUID.class), rs.getString("display_name"), rs.getString("role"), rs.getString("pin_hash"),
+                        rs.getBoolean("pin_must_change"), rs.getInt("pin_failed_count"), rs.getTimestamp("pin_locked_until")})
+                .optional().orElse(null);
+        if (member != null && member[6] != null && ((Timestamp) member[6]).toInstant().isAfter(now)) {
+            throw ApiException.tooMany("LOCKED", "Too many failed attempts; try again later");
+        }
+        boolean pinOk = in.pin() != null && pinEncoder.matches(in.pin(), member == null ? dummyPinHash : (String) member[3]);
+        if (member == null || !pinOk) {
+            if (member != null) {
+                int failures = (Integer) member[5] + 1;
+                boolean lock = failures >= MAX_PIN_FAILURES;
+                jdbc.sql("UPDATE member SET pin_failed_count = :f, pin_locked_until = :u WHERE id = :id").param("f", lock ? 0 : failures)
+                        .param("u", lock ? Timestamp.from(now.plus(PIN_LOCKOUT)) : null, java.sql.Types.TIMESTAMP).param("id", member[0]).update();
+                if (lock) {
+                    notifications.notify(businessId, com.cuadra.api.notification.NotificationService.Type.PIN_LOCKOUT, java.util.Map.of("memberName", (String) member[1]), null, null,
+                            "PIN_LOCKOUT:" + member[0] + ":" + now.getEpochSecond() / 900, "cuentiva://equipo");
+                }
+            }
+            throw ApiException.unauthorized("INVALID_CREDENTIALS", "Invalid business code, user or PIN");
+        }
+        Role role = Role.valueOf((String) member[2]);
+        if (role == Role.OWNER) throw ApiException.forbidden("OWNER_USES_GOOGLE", "The owner signs in with Google");
+        jdbc.sql("UPDATE member SET pin_failed_count = 0, pin_locked_until = NULL WHERE id = :id").param("id", member[0]).update();
+        plans.requireRoom(businessId, com.cuadra.api.plan.PlanService.Feature.DEVICES);
+        UUID register = jdbc.sql("SELECT id FROM cash_register WHERE business_id = :b AND active ORDER BY name LIMIT 1").param("b", businessId).query(UUID.class).optional().orElse(null);
+        UUID deviceId = UUID.randomUUID();
+        String token = TokenHasher.newToken();
+        String deviceName = in.deviceName() == null || in.deviceName().isBlank() ? "Teléfono de " + member[1] : in.deviceName().trim();
+        jdbc.sql("""
+                        INSERT INTO device (id, business_id, kind, name, model, os_version, app_version, token_hash, cash_register_id, linked_by_member_id, trust_role)
+                        VALUES (:id, :b, 'PERSONAL', :n, :m, :o, :a, :h, :r, :by, :trust)
+                        """)
+                .param("id", deviceId).param("b", businessId).param("n", deviceName).param("m", in.model()).param("o", in.osVersion()).param("a", in.appVersion())
+                .param("h", TokenHasher.hash(token)).param("r", register, java.sql.Types.OTHER).param("by", member[0]).param("trust", role.name()).update();
+        // Máximo 2 teléfonos personales activos por persona: el más viejo se cierra (y suelta las cuentas apartadas que retenía).
+        List<UUID> replaced = jdbc.sql("""
+                        UPDATE device SET revoked_at = :now, revoked_reason = 'REPLACED', rev = nextval('change_rev_seq') WHERE id IN (
+                            SELECT id FROM device WHERE business_id = :b AND linked_by_member_id = :m AND kind = 'PERSONAL' AND revoked_at IS NULL
+                             ORDER BY linked_at DESC, id OFFSET :keep) RETURNING id
+                        """).param("now", Timestamp.from(now)).param("b", businessId).param("m", member[0]).param("keep", MAX_PERSONAL_PHONES).query(UUID.class).list();
+        for (UUID d : replaced) {
+            jdbc.sql("UPDATE sale SET locked_by_device_id = NULL, locked_until = NULL WHERE locked_by_device_id = :d").param("d", d).update();
+            audit.log(businessId, (UUID) member[0], null, deviceId, "device.revoke", "device", d, "replaced");
+        }
+        audit.log(businessId, (UUID) member[0], null, deviceId, "device.member_login", "device", deviceId, role.name());
+        return new MemberLoginResult(deviceId, token, businessId, (UUID) member[0], (String) member[1], role.name(), (Boolean) member[4]);
     }
 
     public List<DeviceView> list(UUID businessId) {
@@ -164,7 +247,7 @@ public class DeviceService {
     @Transactional
     public void revoke(MemberContext ctx, UUID deviceId) {
         ctx.require(Permission.MANAGE_DEVICES);
-        int n = jdbc.sql("UPDATE device SET revoked_at = :now, rev = nextval('change_rev_seq') WHERE id = :id AND business_id = :b AND revoked_at IS NULL")
+        int n = jdbc.sql("UPDATE device SET revoked_at = :now, revoked_reason = 'MANUAL', rev = nextval('change_rev_seq') WHERE id = :id AND business_id = :b AND revoked_at IS NULL")
                 .param("now", Timestamp.from(clock.instant())).param("id", deviceId).param("b", ctx.businessId()).update();
         if (n == 0) throw ApiException.notFound("DEVICE_NOT_FOUND", "Device not found");
         // Un teléfono revocado no puede seguir reteniendo cuentas apartadas: se liberan para que otro las complete sin esperar los 10 min.

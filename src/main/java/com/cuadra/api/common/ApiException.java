@@ -6,6 +6,8 @@ import org.springframework.http.HttpStatus;
 public class ApiException extends RuntimeException {
     private final HttpStatus status;
     private final String code;
+    /** Datos extra para que el cliente arme un mensaje claro (p. ej. límite y saldo). Salen como propiedades del Problem Details y en el resultado de sincronizar. */
+    private final java.util.Map<String, Object> details = new java.util.LinkedHashMap<>();
 
     public ApiException(HttpStatus status, String code, String message) {
         super(message);
@@ -15,6 +17,12 @@ public class ApiException extends RuntimeException {
 
     public HttpStatus status() { return status; }
     public String code() { return code; }
+    public java.util.Map<String, Object> details() { return details; }
+
+    public ApiException with(String key, Object value) {
+        details.put(key, value);
+        return this;
+    }
 
     public static ApiException badRequest(String code, String message) {
         return new ApiException(HttpStatus.BAD_REQUEST, code, message);

@@ -17,9 +17,11 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/auth")
 public class AuthController {
     private final AuthService auth;
+    private final com.cuadra.api.device.DeviceService devices;
 
-    public AuthController(AuthService auth) {
+    public AuthController(AuthService auth, com.cuadra.api.device.DeviceService devices) {
         this.auth = auth;
+        this.devices = devices;
     }
 
     public record GoogleLoginRequest(@NotBlank String idToken, @jakarta.validation.constraints.Pattern(regexp = "APP|WEB") String kind) {}
@@ -40,6 +42,17 @@ public class AuthController {
     public LoginResponse platform(@Valid @RequestBody PlatformLoginRequest body, @RequestHeader(value = "User-Agent", required = false) String userAgent) {
         AuthService.LoginResult r = auth.loginPlatformAdmin(body.username(), body.password(), userAgent);
         return new LoginResponse(r.token(), "Bearer", r.expiresAt(), r.userId());
+    }
+
+    public record MemberLoginRequest(@NotBlank @jakarta.validation.constraints.Size(max = 20) String businessCode, @NotBlank @jakarta.validation.constraints.Size(max = 120) String username,
+                                     @NotBlank @jakarta.validation.constraints.Size(max = 12) String pin, @jakarta.validation.constraints.Size(max = 80) String deviceName,
+                                     @jakarta.validation.constraints.Size(max = 80) String model, @jakarta.validation.constraints.Size(max = 40) String osVersion,
+                                     @jakarta.validation.constraints.Size(max = 20) String appVersion) {}
+
+    /** Entrar con código del negocio + usuario + PIN (admins y cajeros creados a mano): vincula este teléfono al negocio. */
+    @PostMapping("/member-login")
+    public com.cuadra.api.device.DeviceService.MemberLoginResult memberLogin(@Valid @RequestBody MemberLoginRequest body, @RequestHeader(value = "User-Agent", required = false) String userAgent) {
+        return devices.memberLogin(new com.cuadra.api.device.DeviceService.MemberLoginRequest(body.businessCode(), body.username(), body.pin(), body.deviceName(), body.model(), body.osVersion(), body.appVersion()), userAgent);
     }
 
     @PostMapping("/logout")

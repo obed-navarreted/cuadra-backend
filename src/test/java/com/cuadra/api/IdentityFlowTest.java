@@ -95,7 +95,6 @@ class IdentityFlowTest extends ApiTestBase {
         call(get("/api/b/" + b), bearer(stranger), null).andExpect(status().isNotFound());
         call(get("/api/b/" + b + "/members"), bearer(stranger), null).andExpect(status().isNotFound());
         call(put("/api/b/" + b), bearer(stranger), "{\"name\":\"hack\"}").andExpect(status().isNotFound());
-        call(post("/api/b/" + b + "/invitations"), bearer(stranger), "{\"role\":\"CASHIER\"}").andExpect(status().isNotFound());
         call(get("/api/b/" + b + "/devices"), bearer(stranger), null).andExpect(status().isNotFound());
     }
 
@@ -104,7 +103,7 @@ class IdentityFlowTest extends ApiTestBase {
         String owner = login("paula");
         UUID b = createBusiness(owner, "Pulpería Paula");
 
-        String created = call(post("/api/b/" + b + "/members"), bearer(owner), "{\"displayName\":\"Kevin\",\"role\":\"CASHIER\",\"pin\":\"1234\"}")
+        String created = call(post("/api/b/" + b + "/members"), bearer(owner), "{\"displayName\":\"Kevin\",\"role\":\"CASHIER\",\"pin\":\"12345\"}")
                 .andExpect(status().isCreated()).andExpect(jsonPath("$.pinSet", is(true)))
                 .andExpect(jsonPath("$.pinHash", nullValue())).andReturn().getResponse().getContentAsString();
         UUID kevin = UUID.fromString(JsonPath.read(created, "$.id"));
@@ -122,11 +121,11 @@ class IdentityFlowTest extends ApiTestBase {
 
         // El teléfono actúa como Kevin (cajero): puede leer miembros pero no crear a otros.
         call(post("/api/b/" + b + "/members"), "Device " + deviceToken,
-                "{\"displayName\":\"Otro\",\"role\":\"CASHIER\",\"pin\":\"5555\"}")
+                "{\"displayName\":\"Otro\",\"role\":\"CASHIER\",\"pin\":\"55555\"}")
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code", is("MEMBER_REQUIRED")));
         mvc.perform(post("/api/b/" + b + "/members").header("Authorization", "Device " + deviceToken)
                         .header("X-Member-Id", kevin.toString()).contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"displayName\":\"Otro\",\"role\":\"CASHIER\",\"pin\":\"5555\"}"))
+                        .content("{\"displayName\":\"Otro\",\"role\":\"CASHIER\",\"pin\":\"55555\"}"))
                 .andExpect(status().isForbidden()).andExpect(jsonPath("$.code", is("FORBIDDEN")));
     }
 
@@ -157,47 +156,32 @@ class IdentityFlowTest extends ApiTestBase {
     }
 
     @Test
-    void invitationLetsAGoogleUserJoinAsAdminAndAdminsManageEveryoneButNotTheBusiness() throws Exception {
+    void adminsManageEveryoneButNotTheBusiness() throws Exception {
         String owner = login("oscar");
-        String guest = login("gina");
         UUID b = createBusiness(owner, "Tienda Oscar");
-
-        String inv = call(post("/api/b/" + b + "/invitations"), bearer(owner), "{\"role\":\"ADMIN\"}")
-                .andExpect(status().isCreated()).andExpect(jsonPath("$.url", notNullValue())).andReturn().getResponse().getContentAsString();
-        String code = JsonPath.read(inv, "$.code");
-
-        // Vista previa pública: solo nombre del negocio y rol.
-        mvc.perform(get("/api/invitations/" + code)).andExpect(status().isOk())
-                .andExpect(jsonPath("$.businessName", is("Tienda Oscar"))).andExpect(jsonPath("$.role", is("ADMIN")))
-                .andExpect(jsonPath("$.valid", is(true)));
-
-        call(post("/api/invitations/" + code + "/accept"), bearer(guest), null).andExpect(status().isOk())
-                .andExpect(jsonPath("$.businessId", is(b.toString())));
-        // Un solo uso: ya no vale para otra persona ni la misma.
-        call(post("/api/invitations/" + code + "/accept"), bearer(guest), null).andExpect(status().isConflict());
-        call(post("/api/invitations/" + code + "/accept"), bearer(login("hugo")), null)
-                .andExpect(status().isConflict()).andExpect(jsonPath("$.code", is("INVITATION_EXHAUSTED")));
-
+        String guest = joinAs(owner, b, "gina", "ADMIN");
         call(get("/api/me"), bearer(guest), null).andExpect(jsonPath("$.businesses[0].role", is("ADMIN")));
-
-        // El admin gestiona a todos menos al dueño: invita y crea cajeros y también otros admins.
-        call(post("/api/b/" + b + "/invitations"), bearer(guest), "{\"role\":\"CASHIER\"}").andExpect(status().isCreated());
-        call(post("/api/b/" + b + "/invitations"), bearer(guest), "{\"role\":\"ADMIN\"}").andExpect(status().isCreated());
-        call(post("/api/b/" + b + "/members"), bearer(guest), "{\"displayName\":\"Caj\",\"role\":\"CASHIER\",\"pin\":\"4321\"}")
-                .andExpect(status().isCreated());
-        call(post("/api/b/" + b + "/members"), bearer(guest), "{\"displayName\":\"Adm\",\"role\":\"ADMIN\",\"pin\":\"4321\"}")
-                .andExpect(status().isCreated());
-        // ...ni edita ajustes del negocio.
+        // El admin crea cajeros y también otros admins con nombre y PIN, pero no edita los ajustes del negocio.
+        call(post("/api/b/" + b + "/members"), bearer(guest), "{\"displayName\":\"Caj\",\"role\":\"CASHIER\",\"pin\":\"43215\"}").andExpect(status().isCreated());
+        call(post("/api/b/" + b + "/members"), bearer(guest), "{\"displayName\":\"Adm\",\"role\":\"ADMIN\",\"pin\":\"43215\"}").andExpect(status().isCreated());
         call(put("/api/b/" + b), bearer(guest), "{\"name\":\"Mío ahora\"}").andExpect(status().isForbidden());
+    }
+
+    @Test
+    void aPinMustBeExactlyFiveDigits() throws Exception {
+        String owner = login("pinfive");
+        UUID b = createBusiness(owner, "PIN de cinco");
+        for (String bad : new String[] {"1234", "123456", "12a45", "", "1 345"}) {
+            assertCode(call(post("/api/b/" + b + "/members"), bearer(owner), "{\"displayName\":\"X" + bad.length() + "\",\"role\":\"CASHIER\",\"pin\":\"" + bad + "\"}").andExpect(status().isBadRequest()), bad.isEmpty() ? "VALIDATION_FAILED" : "INVALID_PIN");
+        }
+        call(post("/api/b/" + b + "/members"), bearer(owner), "{\"displayName\":\"Bien\",\"role\":\"CASHIER\",\"pin\":\"12345\"}").andExpect(status().isCreated());
     }
 
     @Test
     void adminCannotModifyTheOwnerNorThemselves() throws Exception {
         String owner = login("dora");
-        String admin = login("adan");
         UUID b = createBusiness(owner, "Tienda Dora");
-        String inv = call(post("/api/b/" + b + "/invitations"), bearer(owner), "{\"role\":\"ADMIN\"}").andReturn().getResponse().getContentAsString();
-        call(post("/api/invitations/" + JsonPath.read(inv, "$.code") + "/accept"), bearer(admin), null).andExpect(status().isOk());
+        String admin = joinAs(owner, b, "adan", "ADMIN");
 
         UUID ownerMember = memberIdOf(owner, b);
         UUID adminMember = memberIdOf(admin, b);
@@ -205,20 +189,18 @@ class IdentityFlowTest extends ApiTestBase {
                 .andExpect(status().isForbidden()).andExpect(jsonPath("$.code", is("CANNOT_MODIFY_OWNER")));
         call(put("/api/b/" + b + "/members/" + adminMember), bearer(admin), "{\"role\":\"CASHIER\"}")
                 .andExpect(status().isForbidden()).andExpect(jsonPath("$.code", is("CANNOT_MODIFY_SELF")));
-        call(put("/api/b/" + b + "/members/" + ownerMember + "/pin"), bearer(admin), "{\"pin\":\"9999\"}").andExpect(status().isForbidden());
+        call(put("/api/b/" + b + "/members/" + ownerMember + "/pin"), bearer(admin), "{\"pin\":\"99995\"}").andExpect(status().isForbidden());
     }
 
     @Test
     void ownershipTransferKeepsExactlyOneOwner() throws Exception {
         String owner = login("elena");
-        String heir = login("felix");
         UUID b = createBusiness(owner, "Tienda Elena");
-        String inv = call(post("/api/b/" + b + "/invitations"), bearer(owner), "{\"role\":\"ADMIN\"}").andReturn().getResponse().getContentAsString();
-        call(post("/api/invitations/" + JsonPath.read(inv, "$.code") + "/accept"), bearer(heir), null);
+        String heir = joinAs(owner, b, "felix", "ADMIN");
         UUID heirMember = memberIdOf(heir, b);
 
         // Un miembro solo con PIN no puede heredar: el dueño exige cuenta de Google.
-        String pinMember = call(post("/api/b/" + b + "/members"), bearer(owner), "{\"displayName\":\"Solo PIN\",\"role\":\"CASHIER\",\"pin\":\"1111\"}")
+        String pinMember = call(post("/api/b/" + b + "/members"), bearer(owner), "{\"displayName\":\"Solo PIN\",\"role\":\"CASHIER\",\"pin\":\"11115\"}")
                 .andReturn().getResponse().getContentAsString();
         call(post("/api/b/" + b + "/owner-transfer"), bearer(owner), "{\"memberId\":\"" + JsonPath.read(pinMember, "$.id") + "\"}")
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.code", is("GOOGLE_REQUIRED")));
@@ -269,8 +251,8 @@ class IdentityFlowTest extends ApiTestBase {
     void publicConfigIsAvailableWithoutLogin() throws Exception {
         mvc.perform(get("/api/config")).andExpect(status().isOk())
                 .andExpect(jsonPath("$.supportEmail", is("ndiazobed@gmail.com")))
-                .andExpect(jsonPath("$.donationMode", is("external_link")))
-                .andExpect(jsonPath("$.donationUrl", org.hamcrest.Matchers.startsWith("https://www.paypal.com/donate/")));
+                .andExpect(jsonPath("$.supportWhatsapp", is("50582724138")))
+                .andExpect(jsonPath("$.donationUrl").doesNotExist()).andExpect(jsonPath("$.donationMode").doesNotExist());
     }
 
     @Test

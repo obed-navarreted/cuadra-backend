@@ -32,6 +32,12 @@ public class AuthTokenFilter extends OncePerRequestFilter {
         return m.matches() ? UUID.fromString(m.group(1)) : null;
     }
 
+    private static final Pattern PUSH_PATH = Pattern.compile("^/api/b/[0-9a-fA-F-]{36}/sync/push$");
+
+    private static boolean isDrainPush(HttpServletRequest request) {
+        return "POST".equals(request.getMethod()) && PUSH_PATH.matcher(request.getRequestURI()).matches();
+    }
+
     private static boolean isRead(String method) {
         return method.equals("GET") || method.equals("HEAD") || method.equals("OPTIONS");
     }
@@ -52,6 +58,14 @@ public class AuthTokenFilter extends OncePerRequestFilter {
                 response.setStatus(403);
                 response.setContentType("application/problem+json");
                 response.getWriter().write("{\"type\":\"about:blank\",\"title\":\"Forbidden\",\"status\":403,\"code\":\"VIEW_AS_READ_ONLY\"}");
+                return;
+            }
+            // Teléfono personal de alguien dado de baja: solo puede enviar lo pendiente. Todo lo demás responde un 401 con un código claro para que la app
+            // muestre «Tu acceso fue desactivado» (y siga enviando lo que quede).
+            if (actor.isPresent() && actor.get().isDraining() && !isDrainPush(request)) {
+                response.setStatus(401);
+                response.setContentType("application/problem+json");
+                response.getWriter().write("{\"type\":\"about:blank\",\"title\":\"Unauthorized\",\"status\":401,\"code\":\"ACCESS_DISABLED\"}");
                 return;
             }
             actor.ifPresent(a -> SecurityContextHolder.getContext()

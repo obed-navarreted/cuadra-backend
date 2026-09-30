@@ -25,7 +25,7 @@ public class AuthStore {
 
     private record SessionRow(UUID id, UUID userId, Instant seen, UUID viewAs) {}
 
-    private record DeviceRow(UUID id, UUID businessId, Instant seen) {}
+    private record DeviceRow(UUID id, UUID businessId, Instant seen, String trust, Instant revokedAt, String revokedReason) {}
 
     /**
      * IMPORTANTE: primero se lee y se suelta la conexión; recién después se actualiza `last_seen`. Hacerlo dentro del mapeo de filas pedía una
@@ -54,16 +54,21 @@ public class AuthStore {
 
     public Optional<Actor> findDevice(String token) {
         Instant now = clock.instant();
-        Optional<DeviceRow> row = jdbc.sql("SELECT id, business_id, last_seen_at FROM device WHERE token_hash = :h AND revoked_at IS NULL")
+        // Un teléfono revocado no entra, SALVO el personal de alguien dado de baja: ese solo puede terminar de enviar lo pendiente (ver Actor.draining).
+        Optional<DeviceRow> row = jdbc.sql("""
+                        SELECT id, business_id, last_seen_at, trust_role, revoked_at, revoked_reason FROM device
+                         WHERE token_hash = :h AND (revoked_at IS NULL OR revoked_reason = 'MEMBER_DISABLED')
+                        """)
                 .param("h", TokenHasher.hash(token))
                 .query((rs, n) -> new DeviceRow(rs.getObject("id", UUID.class), rs.getObject("business_id", UUID.class),
-                        rs.getTimestamp("last_seen_at") == null ? null : rs.getTimestamp("last_seen_at").toInstant()))
+                        rs.getTimestamp("last_seen_at") == null ? null : rs.getTimestamp("last_seen_at").toInstant(), rs.getString("trust_role"),
+                        rs.getTimestamp("revoked_at") == null ? null : rs.getTimestamp("revoked_at").toInstant(), rs.getString("revoked_reason")))
                 .optional();
         row.ifPresent(r -> {
-            if (r.seen() == null || Duration.between(r.seen(), now).compareTo(DEVICE_TOUCH) > 0) {
+            if (r.revokedAt() == null && (r.seen() == null || Duration.between(r.seen(), now).compareTo(DEVICE_TOUCH) > 0)) {
                 jdbc.sql("UPDATE device SET last_seen_at = :now WHERE id = :id").param("now", Timestamp.from(now)).param("id", r.id()).update();
             }
         });
-        return row.map(r -> Actor.device(r.id(), r.businessId()));
+        return row.map(r -> r.revokedAt() == null ? Actor.device(r.id(), r.businessId(), r.trust()) : Actor.draining(r.id(), r.businessId(), r.trust(), r.revokedAt()));
     }
 }

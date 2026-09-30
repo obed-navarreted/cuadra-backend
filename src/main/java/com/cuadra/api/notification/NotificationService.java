@@ -38,6 +38,16 @@ public class NotificationService {
         SHIFT_DIFFERENCE("CASH", Audience.OWNER, true),
         SHIFT_NOT_CLOSED("CASH", Audience.OWNER_ADMINS, false),
         SALE_DELETED("CASH", Audience.OWNER, false),
+        /** Una venta cobrada sin conexión chocó con otra versión (cuenta ya cobrada o descartada en otro teléfono) y se guardó aparte: revisar si es un duplicado. */
+        SALE_CONFLICT("CASH", Audience.OWNER, false),
+        /** Se devolvieron productos de una venta (con su motivo). */
+        SALE_RETURNED("CASH", Audience.OWNER, false),
+        /** Un cajero anuló su última venta en los primeros minutos (con su motivo). */
+        SALE_UNDONE("CASH", Audience.OWNER, false),
+        /** Operaciones de alguien dado de baja llegaron después de la baja (hechas antes, sin conexión): se aceptaron y quedan marcadas. */
+        LATE_AFTER_DISABLE("TEAM", Audience.OWNER, true),
+        /** Un cajero cambió el precio o el costo de un producto. */
+        PRICE_CHANGED("STOCK", Audience.OWNER, false),
         DEVICE_STALE("TEAM", Audience.OWNER_ADMINS, false),
         PIN_LOCKOUT("TEAM", Audience.OWNER_ADMINS, true),
         MEMBER_JOINED("TEAM", Audience.NONE, false),

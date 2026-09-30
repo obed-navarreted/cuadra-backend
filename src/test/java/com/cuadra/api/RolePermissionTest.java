@@ -18,8 +18,8 @@ class RolePermissionTest {
 
     @Test
     void adminManagesEveryoneExceptTheOwnerAndNeverTheBusiness() {
-        Set<Permission> allowed = EnumSet.of(Permission.VIEW_MEMBERS, Permission.MANAGE_CASHIERS, Permission.INVITE_CASHIER,
-                Permission.MANAGE_DEVICES, Permission.SELL, Permission.VIEW_REPORTS, Permission.MANAGE_CATALOG, Permission.MANAGE_ADMINS, Permission.INVITE_ADMIN,
+        Set<Permission> allowed = EnumSet.of(Permission.VIEW_MEMBERS, Permission.MANAGE_CASHIERS,
+                Permission.MANAGE_DEVICES, Permission.SELL, Permission.VIEW_REPORTS, Permission.MANAGE_CATALOG, Permission.MANAGE_ADMINS,
                 Permission.PROGRAM_NOTIFICATIONS, Permission.VIEW_SETTINGS, Permission.EDIT_PRODUCTS, Permission.EDIT_SALES, Permission.MANAGE_CREDIT, Permission.MANAGE_EXPENSES, Permission.MANAGE_STOCK);
         for (Permission p : Permission.values()) assertThat(Role.ADMIN.can(p)).as("ADMIN %s", p).isEqualTo(allowed.contains(p));
         assertThat(Role.ADMIN.can(Permission.MANAGE_ADMINS)).isTrue();
