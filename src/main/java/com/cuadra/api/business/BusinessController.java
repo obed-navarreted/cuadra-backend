@@ -71,7 +71,7 @@ public class BusinessController {
     public AccessCodeView regenerateAccessCode(@AuthenticationPrincipal Actor actor, @PathVariable UUID businessId,
                                                @RequestHeader(value = Access.MEMBER_HEADER, required = false) UUID memberId) {
         MemberContext ctx = access.member(actor, businessId, memberId);
-        ctx.require(Permission.EDIT_BUSINESS);
+        ctx.require(Permission.MANAGE_ACCESS_CODE);
         return new AccessCodeView(businesses.regenerateAccessCode(businessId, ctx.memberId(), ctx.userId()));
     }
 
@@ -80,7 +80,7 @@ public class BusinessController {
     public AccessCodeView setAccessCode(@AuthenticationPrincipal Actor actor, @PathVariable UUID businessId,
                                         @RequestHeader(value = Access.MEMBER_HEADER, required = false) UUID memberId, @jakarta.validation.Valid @org.springframework.web.bind.annotation.RequestBody SetAccessCode body) {
         MemberContext ctx = access.member(actor, businessId, memberId);
-        ctx.require(Permission.EDIT_BUSINESS);
+        ctx.require(Permission.MANAGE_ACCESS_CODE);
         return new AccessCodeView(businesses.setAccessCode(businessId, ctx.memberId(), ctx.userId(), body.accessCode()));
     }
 

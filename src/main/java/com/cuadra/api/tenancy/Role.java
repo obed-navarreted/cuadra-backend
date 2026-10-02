@@ -5,13 +5,13 @@ import java.util.Set;
 
 /** Roles del negocio y la matriz de permisos (sección 3.2 del plan). Un solo lugar, probado por celda. */
 public enum Role {
-    /** Todo, y lo único que solo él puede: editar el negocio, el plan, eliminarlo y traspasarlo. Nadie más puede modificarlo a él. */
+    /** Todo, y lo único que solo él puede: el código del negocio, el plan, eliminarlo y traspasarlo. Nadie más puede modificarlo a él. */
     OWNER(EnumSet.allOf(Permission.class)),
     /** Gestiona a TODAS las personas menos al dueño (cajeros y otros admins: crear, invitar, cambiar datos y PIN, dar de baja). */
     ADMIN(EnumSet.of(
             Permission.VIEW_MEMBERS, Permission.MANAGE_CASHIERS,
             Permission.MANAGE_DEVICES, Permission.SELL, Permission.VIEW_REPORTS, Permission.MANAGE_CATALOG, Permission.MANAGE_ADMINS,
-            Permission.PROGRAM_NOTIFICATIONS, Permission.VIEW_SETTINGS, Permission.EDIT_PRODUCTS, Permission.EDIT_SALES, Permission.MANAGE_CREDIT, Permission.MANAGE_EXPENSES, Permission.MANAGE_STOCK)),
+            Permission.PROGRAM_NOTIFICATIONS, Permission.VIEW_SETTINGS, Permission.EDIT_BUSINESS, Permission.EDIT_PRODUCTS, Permission.EDIT_SALES, Permission.MANAGE_CREDIT, Permission.MANAGE_EXPENSES, Permission.MANAGE_STOCK)),
     CASHIER(EnumSet.of(Permission.VIEW_MEMBERS, Permission.SELL, Permission.VIEW_SETTINGS, Permission.EDIT_PRODUCTS));
 
     public enum Permission {
@@ -34,7 +34,10 @@ public enum Role {
         MANAGE_ADMINS,
         MANAGE_DEVICES,
         PROGRAM_NOTIFICATIONS,
+        /** Ajustes del negocio (nombre, módulos, cobro en caja, reglas, notificaciones...). Dueño y admin. */
         EDIT_BUSINESS,
+        /** Código de acceso del negocio (renovar o elegir uno). Solo el dueño. */
+        MANAGE_ACCESS_CODE,
         MANAGE_PLAN,
         DELETE_BUSINESS,
         TRANSFER_OWNERSHIP

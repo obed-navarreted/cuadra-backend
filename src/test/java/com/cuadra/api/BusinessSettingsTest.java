@@ -27,4 +27,21 @@ class BusinessSettingsTest extends ApiTestBase {
         // Pedir vaciar y a la vez poner un valor: gana el valor.
         call(put(url), bearer(owner), "{\"clearShiftNoteThreshold\":true,\"shiftNoteThresholdMinor\":700}").andExpect(jsonPath("$.shiftNoteThresholdMinor", is(700)));
     }
+
+    @Test
+    void anAdminEditsTheBusinessSettingsButNeitherDeletesItNorTouchesTheAccessCode() throws Exception {
+        String owner = login("bset-a");
+        UUID b = createBusiness(owner, "Ajustes admin");
+        String url = "/api/b/" + b;
+        String admin = joinAs(owner, b, "bset-a2", "ADMIN");
+        String cashier = joinAs(owner, b, "bset-a3", "CASHIER");
+        call(put(url), bearer(admin), "{\"name\":\"Nuevo nombre\",\"registerCheckout\":true}").andExpect(status().isOk())
+                .andExpect(jsonPath("$.name", is("Nuevo nombre"))).andExpect(jsonPath("$.registerCheckout", is(true)));
+        call(put(url), bearer(admin), "{\"registerCheckout\":false}").andExpect(status().isOk()).andExpect(jsonPath("$.registerCheckout", is(false)));
+        call(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete(url), bearer(admin), null).andExpect(status().isForbidden());
+        call(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(url + "/access-code"), bearer(admin), null).andExpect(status().isForbidden());
+        call(put(url + "/access-code"), bearer(admin), "{\"accessCode\":\"88888\"}").andExpect(status().isForbidden());
+        call(put(url), bearer(cashier), "{\"name\":\"Intruso\"}").andExpect(status().isForbidden());
+        call(get(url), bearer(owner), null).andExpect(jsonPath("$.name", is("Nuevo nombre")));
+    }
 }

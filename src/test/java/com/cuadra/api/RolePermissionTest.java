@@ -17,13 +17,15 @@ class RolePermissionTest {
     }
 
     @Test
-    void adminManagesEveryoneExceptTheOwnerAndNeverTheBusiness() {
+    void adminManagesEveryoneExceptTheOwnerAndEditsTheBusinessButNotItsLifecycle() {
         Set<Permission> allowed = EnumSet.of(Permission.VIEW_MEMBERS, Permission.MANAGE_CASHIERS,
                 Permission.MANAGE_DEVICES, Permission.SELL, Permission.VIEW_REPORTS, Permission.MANAGE_CATALOG, Permission.MANAGE_ADMINS,
-                Permission.PROGRAM_NOTIFICATIONS, Permission.VIEW_SETTINGS, Permission.EDIT_PRODUCTS, Permission.EDIT_SALES, Permission.MANAGE_CREDIT, Permission.MANAGE_EXPENSES, Permission.MANAGE_STOCK);
+                Permission.PROGRAM_NOTIFICATIONS, Permission.VIEW_SETTINGS, Permission.EDIT_BUSINESS, Permission.EDIT_PRODUCTS, Permission.EDIT_SALES, Permission.MANAGE_CREDIT, Permission.MANAGE_EXPENSES, Permission.MANAGE_STOCK);
         for (Permission p : Permission.values()) assertThat(Role.ADMIN.can(p)).as("ADMIN %s", p).isEqualTo(allowed.contains(p));
         assertThat(Role.ADMIN.can(Permission.MANAGE_ADMINS)).isTrue();
-        assertThat(Role.ADMIN.can(Permission.EDIT_BUSINESS)).isFalse();
+        assertThat(Role.ADMIN.can(Permission.EDIT_BUSINESS)).isTrue();
+        assertThat(Role.ADMIN.can(Permission.MANAGE_ACCESS_CODE)).isFalse();
+        assertThat(Role.ADMIN.can(Permission.DELETE_BUSINESS)).isFalse();
         assertThat(Role.ADMIN.can(Permission.TRANSFER_OWNERSHIP)).isFalse();
     }
 

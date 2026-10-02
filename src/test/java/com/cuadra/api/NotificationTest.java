@@ -305,13 +305,14 @@ class NotificationTest extends ApiTestBase {
     }
 
     @Test
-    void settingsAndPushTokensAreStoredAndOnlyTheOwnerEditsTheBusinessSettings() throws Exception {
+    void settingsAndPushTokensAreStoredAndOwnerAndAdminEditTheBusinessSettings() throws Exception {
         String owner = login("ntfm");
         UUID b = createBusiness(owner, "Ntf M");
         String admin = joinAs(owner, b, "ntfm2", "ADMIN");
         call(get(base(b) + "/notification-settings"), bearer(admin), null).andExpect(jsonPath("$.quietStart", is("21:30"))).andExpect(jsonPath("$.quietEnd", is("07:00"))).andExpect(jsonPath("$.staleHours", is(24)));
         String body = "{\"quietStart\":\"22:00\",\"quietEnd\":\"06:30\",\"summaryEnabled\":true,\"summaryTime\":\"20:00\",\"shiftReminderTime\":\"21:00\",\"staleHours\":12}";
-        call(put(base(b) + "/notification-settings"), bearer(admin), body).andExpect(status().isForbidden());
+        call(put(base(b) + "/notification-settings"), bearer(joinAs(owner, b, "ntfm3", "CASHIER")), body).andExpect(status().isForbidden());
+        call(put(base(b) + "/notification-settings"), bearer(admin), body).andExpect(status().isOk());
         call(put(base(b) + "/notification-settings"), bearer(owner), body).andExpect(status().isOk()).andExpect(jsonPath("$.summaryEnabled", is(true))).andExpect(jsonPath("$.shiftReminderTime", is("21:00")));
         call(put(base(b) + "/notification-settings"), bearer(owner), body.replace("22:00", "25:00")).andExpect(status().isBadRequest());
         for (int i = 0; i < 2; i++) call(put(base(b) + "/push-tokens"), bearer(owner), "{\"fcmToken\":\"tok-1\",\"locale\":\"en\",\"appVersion\":\"1.0\"}").andExpect(status().isNoContent());

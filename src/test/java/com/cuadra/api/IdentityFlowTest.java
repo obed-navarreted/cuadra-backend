@@ -161,10 +161,10 @@ class IdentityFlowTest extends ApiTestBase {
         UUID b = createBusiness(owner, "Tienda Oscar");
         String guest = joinAs(owner, b, "gina", "ADMIN");
         call(get("/api/me"), bearer(guest), null).andExpect(jsonPath("$.businesses[0].role", is("ADMIN")));
-        // El admin crea cajeros y también otros admins con nombre y PIN, pero no edita los ajustes del negocio.
+        // El admin crea cajeros y también otros admins con nombre y PIN, y edita los ajustes del negocio (pero no lo elimina ni toca el código).
         call(post("/api/b/" + b + "/members"), bearer(guest), "{\"displayName\":\"Caj\",\"role\":\"CASHIER\",\"pin\":\"43215\"}").andExpect(status().isCreated());
         call(post("/api/b/" + b + "/members"), bearer(guest), "{\"displayName\":\"Adm\",\"role\":\"ADMIN\",\"pin\":\"43216\"}").andExpect(status().isCreated());
-        call(put("/api/b/" + b), bearer(guest), "{\"name\":\"Mío ahora\"}").andExpect(status().isForbidden());
+        call(put("/api/b/" + b), bearer(guest), "{\"name\":\"Mío ahora\"}").andExpect(status().isOk());
     }
 
     @Test
