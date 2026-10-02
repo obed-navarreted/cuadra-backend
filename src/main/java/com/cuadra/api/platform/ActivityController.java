@@ -36,7 +36,7 @@ public class ActivityController {
                                             @RequestHeader(value = Access.MEMBER_HEADER, required = false) UUID memberId,
                                             @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "50") int size) {
         MemberContext ctx = access.member(actor, businessId, memberId);
-        if (ctx.role() != Role.OWNER) throw com.cuadra.api.common.ApiException.forbidden("FORBIDDEN", "Only the owner can see the activity log");
+        ctx.requireRole(Role.OWNER);   // solo el dueño ve la actividad
         int p = Math.max(page, 0);
         int s = Math.min(Math.max(size, 1), 100);
         long total = jdbc.sql("SELECT count(*) FROM audit_log WHERE business_id = :b").param("b", businessId).query(Long.class).single();

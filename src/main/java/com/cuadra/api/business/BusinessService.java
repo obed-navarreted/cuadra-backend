@@ -29,7 +29,11 @@ public class BusinessService {
     private final com.cuadra.api.plan.PlanService plans;
     private final BusinessDayService days;
 
-    public BusinessService(JdbcClient jdbc, Json json, Audit audit, Clock clock, com.cuadra.api.plan.PlanService plans, BusinessDayService days) {
+    private final com.cuadra.api.push.PushDispatcher push;
+
+    public BusinessService(JdbcClient jdbc, Json json, Audit audit, Clock clock, com.cuadra.api.plan.PlanService plans, BusinessDayService days,
+                           com.cuadra.api.push.PushDispatcher push) {
+        this.push = push;
         this.days = days;
         this.jdbc = jdbc;
         this.json = json;
@@ -47,7 +51,9 @@ public class BusinessService {
                                /** Código corto del negocio: con él, un usuario y su PIN, las personas del equipo entran desde su teléfono (no es secreto; el acceso lo dan usuario + PIN). */
                                String accessCode,
                                /** La moneda ya no se puede cambiar: hay actividad (ventas, gastos, fiados…) registrada en ella. Antes de la primera, sí. */
-                               boolean currencyLocked) {}
+                               boolean currencyLocked,
+                               /** Cobro en caja (ADR 0015): quien atiende puede "enviar a caja" la cuenta y otro la cobra. Apagado por omisión. */
+                               boolean registerCheckout) {}
 
     public record DayRuleView(LocalDate from, String timezone, String dayCutoff) {}
 
@@ -60,7 +66,16 @@ public class BusinessService {
                                  /** En una actualización parcial un valor ausente significa "sin cambio"; para dejar estos dos SIN valor se pide explícitamente. */
                                  Boolean clearCreditDefaultDueDays, Boolean clearShiftNoteThreshold,
                                  /** País (código ISO de 2 letras): da el prefijo de WhatsApp y las sugerencias; se puede corregir cuando sea. */
-                                 String country) {
+                                 String country,
+                                 /** Cobro en caja (ADR 0015). */
+                                 Boolean registerCheckout) {
+        public UpdateBusiness(String name, String type, String currency, String timezone, String defaultLocale, String dayCutoff, Map<String, Boolean> modules,
+                              List<String> posViews, Boolean creditRequiresCustomer, Integer creditDefaultDueDays, Integer creditOverdueDays, Boolean creditLimitEnforced,
+                              Boolean shiftRequired, Long shiftNoteThresholdMinor, Boolean clearCreditDefaultDueDays, Boolean clearShiftNoteThreshold, String country) {
+            this(name, type, currency, timezone, defaultLocale, dayCutoff, modules, posViews, creditRequiresCustomer, creditDefaultDueDays, creditOverdueDays,
+                    creditLimitEnforced, shiftRequired, shiftNoteThresholdMinor, clearCreditDefaultDueDays, clearShiftNoteThreshold, country, null);
+        }
+
         public UpdateBusiness(String name, String type, String currency, String timezone, String defaultLocale, String dayCutoff, Map<String, Boolean> modules,
                               List<String> posViews, Boolean creditRequiresCustomer, Integer creditDefaultDueDays, Integer creditOverdueDays, Boolean creditLimitEnforced,
                               Boolean shiftRequired, Long shiftNoteThresholdMinor, Boolean clearCreditDefaultDueDays, Boolean clearShiftNoteThreshold) {
@@ -127,6 +142,7 @@ public class BusinessService {
     /** El dueño elige un código propio de 5 dígitos (por ejemplo el que ya usa su equipo): tiene que estar libre. */
     @Transactional
     public String setAccessCode(UUID businessId, UUID memberId, UUID userId, String requested) {
+        push.requestSync(businessId);  // los demás teléfonos se ponen al día al instante (solo si se confirma)
         String code = requested == null ? "" : requested.trim();
         if (!code.matches("[1-9]\\d{4}")) throw ApiException.badRequest("INVALID_ACCESS_CODE", "The code must be 5 digits");
         try {
@@ -142,6 +158,7 @@ public class BusinessService {
     /** El dueño renueva el código (por ejemplo si se filtró): quien ya tiene su teléfono vinculado no se ve afectado; los nuevos usan el código nuevo. */
     @Transactional
     public String regenerateAccessCode(UUID businessId, UUID memberId, UUID userId) {
+        push.requestSync(businessId);  // los demás teléfonos se ponen al día al instante (solo si se confirma)
         for (int i = 0; i < 50; i++) {
             String code = String.valueOf(10000 + RANDOM.nextInt(90000));
             try {
@@ -174,7 +191,8 @@ public class BusinessService {
                         json.readFlags(rs.getString("modules")), json.readList(rs.getString("pos_views")),
                         rs.getBoolean("credit_requires_customer"), (Integer) rs.getObject("credit_default_due_days"),
                         rs.getInt("credit_overdue_days"), rs.getBoolean("credit_limit_enforced"),
-                        rs.getBoolean("shift_required"), (Long) rs.getObject("shift_note_threshold_minor"), rs.getString("status"), List.of(), null, rs.getString("access_code"), false))
+                        rs.getBoolean("shift_required"), (Long) rs.getObject("shift_note_threshold_minor"), rs.getString("status"), List.of(), null, rs.getString("access_code"), false,
+                        rs.getBoolean("register_checkout")))
                 .optional().map(this::withRules).orElseThrow(() -> ApiException.notFound("BUSINESS_NOT_FOUND", "Business not found"));
     }
 
@@ -183,7 +201,7 @@ public class BusinessService {
         List<DayRuleView> rules = info.rules().stream().map(r -> new DayRuleView(r.from(), r.zone().getId(), r.cutoff().toString())).toList();
         return new BusinessView(b.id(), b.name(), b.type(), b.country(), b.currency(), b.timezone(), b.defaultLocale(), b.dayCutoff(), b.inventoryMode(), b.modules(),
                 b.posViews(), b.creditRequiresCustomer(), b.creditDefaultDueDays(), b.creditOverdueDays(), b.creditLimitEnforced(), b.shiftRequired(),
-                b.shiftNoteThresholdMinor(), b.status(), rules, info.pendingFrom(clock.instant()), b.accessCode(), hasActivity(b.id()));
+                b.shiftNoteThresholdMinor(), b.status(), rules, info.pendingFrom(clock.instant()), b.accessCode(), hasActivity(b.id()), b.registerCheckout());
     }
 
     /** Hay algo registrado con dinero (ventas, turnos, gastos, movimientos, fiados): la moneda queda fija y la zona u hora de corte rigen desde mañana. */
@@ -223,6 +241,7 @@ public class BusinessService {
     /** Actualización parcial: solo cambia lo que llega. Los módulos se mezclan con los actuales. */
     @Transactional
     public BusinessView update(UUID businessId, UUID memberId, UUID userId, UpdateBusiness req) {
+        push.requestSync(businessId);  // los demás teléfonos se ponen al día al instante (solo si se confirma)
         BusinessView current = get(businessId);
         List<String> sets = new ArrayList<>();
         Map<String, Object> params = new LinkedHashMap<>();
@@ -276,6 +295,7 @@ public class BusinessService {
         set(sets, params, "credit_limit_enforced", req.creditLimitEnforced());
         set(sets, params, "shift_required", req.shiftRequired());
         set(sets, params, "shift_note_threshold_minor", req.shiftNoteThresholdMinor());
+        set(sets, params, "register_checkout", req.registerCheckout());
         if (Boolean.TRUE.equals(req.clearCreditDefaultDueDays()) && req.creditDefaultDueDays() == null) sets.add("credit_default_due_days = NULL");
         if (Boolean.TRUE.equals(req.clearShiftNoteThreshold()) && req.shiftNoteThresholdMinor() == null) sets.add("shift_note_threshold_minor = NULL");
 

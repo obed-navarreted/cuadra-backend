@@ -76,6 +76,13 @@ public class SaleController {
         return sales.list(ctx, new SaleService.Filter(status, from, to, hourFrom, hourTo, byMember, method), page, size);
     }
 
+    /** «Por cobrar en caja» (ADR 0015): cuentas enviadas a caja que esperan su cobro. Cualquier persona del negocio las ve. */
+    @GetMapping("/register-queue")
+    public java.util.List<SaleService.SaleView> registerQueue(@AuthenticationPrincipal Actor actor, @PathVariable UUID businessId,
+                                                             @RequestHeader(value = Access.MEMBER_HEADER, required = false) UUID memberId) {
+        return sales.registerQueue(access.member(actor, businessId, memberId));
+    }
+
     @GetMapping("/summary")
     public SaleService.Summary summary(@AuthenticationPrincipal Actor actor, @PathVariable UUID businessId,
                                        @RequestHeader(value = Access.MEMBER_HEADER, required = false) UUID memberId,

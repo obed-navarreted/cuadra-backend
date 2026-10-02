@@ -124,7 +124,10 @@ public class ShiftService {
                         rs.getTimestamp("closed_at") == null ? null : rs.getTimestamp("closed_at").toInstant(), (Long) rs.getObject("counted_cash_minor")))
                 .optional().orElseThrow(() -> ApiException.notFound("SHIFT_NOT_FOUND", "Shift not found"));
         // Un cajero cierra el turno que abrió; dueño y admins, cualquiera.
-        if (ctx.role() == Role.CASHIER && !row.openedBy.equals(ctx.memberId())) throw ApiException.forbidden("FORBIDDEN", "Only the person who opened the shift can close it");
+        if (ctx.role() == Role.CASHIER && !row.openedBy.equals(ctx.memberId())) {
+            if (ctx.unverifiedRole() != null) throw ctx.pinVerificationRequired();
+            throw ApiException.forbidden("FORBIDDEN", "Only the person who opened the shift can close it");
+        }
         if (row.status.equals("CLOSED")) {
             if (java.util.Objects.equals(row.counted, in.countedMinor())) return new Result(get(ctx, id, true), Outcome.UNCHANGED);
             throw ApiException.conflict("SHIFT_CLOSED", "This shift is already closed");

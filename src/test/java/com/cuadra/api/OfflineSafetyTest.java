@@ -84,7 +84,7 @@ class OfflineSafetyTest extends ApiTestBase {
     }
 
     @Test
-    void anOwnerActionQueuedAndSentWhileACashierIsActiveKeepsTheOwnersRoleOnlyIfThePhoneAllowsIt() throws Exception {
+    void anOwnerActionQueuedAndSentWhileACashierIsActiveKeepsTheOwnersRoleOnlyIfThePhoneAllowsOrThePinWasVerified() throws Exception {
         String owner = login("off-b");
         UUID b = createBusiness(owner, "Off B");
         UUID ownerMember = memberIdOf(owner, b);
@@ -96,10 +96,10 @@ class OfflineSafetyTest extends ApiTestBase {
         // El mismo retiro como Kevin (el que está activo): un cajero no puede sacar dinero.
         asDevice(post(pushUrl(b)), shared, kevin, push(opBy(kevin, Instant.now(), "CASH_MOVEMENT_UPSERT", UUID.randomUUID(), withdrawal)))
                 .andExpect(jsonPath("$.results[0].code", is("FORBIDDEN")));
-        // Un teléfono que vinculó un cajero nunca actúa como dueño, aunque la operación lo diga: rechazo visible, no se aplica.
+        // En un teléfono que vinculó un cajero, el dueño solo actúa como dueño si el servidor verificó su PIN en ese teléfono: sin eso, rechazo visible.
         String personal = personalPhone(owner, b, "Kevin");
         asDevice(post(pushUrl(b)), personal, kevin, push(opBy(ownerMember, Instant.now(), "CASH_MOVEMENT_UPSERT", UUID.randomUUID(), withdrawal)))
-                .andExpect(jsonPath("$.results[0].status", is("REJECTED"))).andExpect(jsonPath("$.results[0].code", is("DEVICE_NOT_TRUSTED")));
+                .andExpect(jsonPath("$.results[0].status", is("REJECTED"))).andExpect(jsonPath("$.results[0].code", is("PIN_VERIFICATION_REQUIRED")));
         // Una sesión web solo actúa como sí misma.
         call(post(pushUrl(b)), bearer(owner), push(opBy(kevin, Instant.now(), "SALE_UPSERT", UUID.randomUUID(), completed(100))))
                 .andExpect(jsonPath("$.results[0].code", is("MEMBER_MISMATCH")));

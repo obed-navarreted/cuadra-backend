@@ -55,7 +55,9 @@ public class ReportService {
      * periodo: devoluciones hechas en él y ventas de jornadas anteriores anuladas en él. `netMinor` = total − devoluciones − anuladas de días anteriores.
      */
     public record Sales(long count, long totalMinor, long discountMinor, long averageTicketMinor, long cancelledCount,
-                        long returnsCount, long returnsMinor, long priorCancelledCount, long priorCancelledMinor, long netMinor) {}
+                        long returnsCount, long returnsMinor, long priorCancelledCount, long priorCancelledMinor, long netMinor,
+                        /** «Descuentos por promociones»: lo que las promociones por cantidad descontaron en las ventas del periodo (ya restado del total). */
+                        long promotionDiscountMinor) {}
 
     public record MethodAmount(String method, long amountMinor) {}
 
@@ -104,7 +106,11 @@ public class ReportService {
                            /** Ventas del día − devoluciones − ventas anuladas de días anteriores. */
                            long netSalesMinor,
                            /** Gastos, abonos, retiros y entradas de días ANTERIORES anulados en esta jornada: su efecto en el efectivo esperado va aquí. */
-                           List<LaterVoid> laterVoids) {}
+                           List<LaterVoid> laterVoids,
+                           /** Cobro en caja (ADR 0015): cuentas enviadas a caja que seguían sin cobrar al terminar la jornada (o ahora, si no ha terminado). No son ventas. */
+                           long pendingCheckoutCount, long pendingCheckoutMinor,
+                           /** «Descuentos por promociones» de las ventas de la jornada (ya restados de las ventas). */
+                           long promotionDiscountMinor) {}
 
     /** kind: EXPENSE_DRAWER | EXPENSE_OTHER | CREDIT_PAYMENT | WITHDRAWAL | DEPOSIT. `cashEffectMinor`: cuánto cambia el efectivo esperado (con signo). */
     public record LaterVoid(String kind, long count, long amountMinor, long cashEffectMinor) {}
@@ -188,6 +194,9 @@ public class ReportService {
         q("SELECT " + businessDate("s.cancelled_at") + ", count(*), coalesce(sum(s.total_minor), 0), coalesce(sum((SELECT coalesce(sum(p.amount_minor), 0) FROM sale_payment p WHERE p.sale_id = s.id AND p.method = 'CASH')), 0) "
                 + "FROM sale s WHERE " + PRIOR_CANCEL_IN_RANGE + " GROUP BY 1", b, r)
                 .query((rs, n) -> { prior.put(rs.getObject(1, LocalDate.class), new long[] {rs.getLong(2), rs.getLong(3), rs.getLong(4)}); return null; }).list();
+        Map<LocalDate, Long> promo = new java.util.HashMap<>();
+        q("SELECT " + businessDate("s.completed_at") + ", coalesce(sum(sp.discount_minor), 0) FROM sale s JOIN sale_promotion sp ON sp.sale_id = s.id WHERE " + SALE_IN_RANGE + " GROUP BY 1", b, r)
+                .query((rs, n) -> { promo.put(rs.getObject(1, LocalDate.class), rs.getLong(2)); return null; }).list();
         Map<LocalDate, long[]> returned = new java.util.HashMap<>();   // [n, total]
         q("SELECT " + businessDate("r.occurred_at") + ", count(*), coalesce(sum(r.total_minor), 0) FROM sale_return r WHERE " + RETURN_IN_RANGE + " GROUP BY 1", b, r)
                 .query((rs, n) -> { returned.put(rs.getObject(1, LocalDate.class), new long[] {rs.getLong(2), rs.getLong(3)}); return null; }).list();
@@ -239,6 +248,15 @@ public class ReportService {
                     return null;
                 }).list();
 
+        // Cuentas por cobrar en caja al final de cada jornada: enviadas antes del final y que entonces aún no se cobraban ni anulaban.
+        record Pending(Instant sent, Instant settled, long total) {}
+        List<Pending> pendings = q("""
+                        SELECT s.sent_to_register_at, CASE WHEN s.status = 'PARKED' THEN NULL ELSE coalesce(s.completed_at, s.cancelled_at, s.updated_at) END, s.total_minor
+                          FROM sale s WHERE s.business_id = :b AND s.sent_to_register_at IS NOT NULL AND s.sent_to_register_at < :e
+                           AND (s.status = 'PARKED' OR coalesce(s.completed_at, s.cancelled_at, s.updated_at) >= :s)""", b, r)
+                .query((rs, n) -> new Pending(rs.getTimestamp(1).toInstant(), rs.getTimestamp(2) == null ? null : rs.getTimestamp(2).toInstant(), rs.getLong(3))).list();
+        Instant nowInstant = clock.instant();
+
         List<DayClose> out = new java.util.ArrayList<>();
         long[] none = new long[6];
         for (LocalDate d = r.from(); !d.isAfter(r.to()); d = d.plusDays(1)) {
@@ -261,8 +279,16 @@ public class ReportService {
             if (mv[4] > 0) later.add(new LaterVoid("DEPOSIT", mv[4], mv[5], -mv[5]));
             long laterCash = later.stream().mapToLong(LaterVoid::cashEffectMinor).sum();
             long expected = pm.getOrDefault("CASH", 0L) + cm.getOrDefault("CASH", 0L) + mv[1] - ev[0] - mv[0] - cashRefunds - pv[2] + laterCash;
+            Instant end = info.endOf(d).isAfter(nowInstant) ? nowInstant : info.endOf(d);
+            long pendingN = 0;
+            long pendingMinor = 0;
+            for (Pending p : pendings) {
+                if (!p.sent().isBefore(end) || (p.settled() != null && !p.settled().isAfter(end))) continue;
+                pendingN++;
+                pendingMinor += p.total();
+            }
             out.add(new DayClose(d, info.startOf(d), info.endOf(d), sv[0], sv[1], amounts(pm), amounts(cm), ev[0], ev[1], mv[0], mv[1], expected, cv[0], cv[1],
-                    rv[0], rv[1], amounts(fm), cashRefunds, pv[0], pv[1], pv[2], sv[1] - rv[1] - pv[1], later));
+                    rv[0], rv[1], amounts(fm), cashRefunds, pv[0], pv[1], pv[2], sv[1] - rv[1] - pv[1], later, pendingN, pendingMinor, promo.getOrDefault(d, 0L)));
         }
         return new DailyClose(r, out, syncWarnings(b));
     }
@@ -291,10 +317,11 @@ public class ReportService {
         ctx.require(Permission.VIEW_REPORTS);
         long[] v = q("SELECT count(*), coalesce(sum(total_minor), 0), coalesce(sum(discount_minor), 0) FROM sale s WHERE " + SALE_IN_RANGE, ctx.businessId(), r)
                 .query((rs, n) -> new long[] {rs.getLong(1), rs.getLong(2), rs.getLong(3)}).single();
-        long cancelled = q("SELECT count(*) FROM sale s WHERE s.business_id = :b AND s.status = 'CANCELLED' AND s.cancelled_at >= :s AND s.cancelled_at < :e", ctx.businessId(), r).query(Long.class).single();
+        long cancelled = q("SELECT count(*) FROM sale s WHERE s.business_id = :b AND s.status = 'CANCELLED' AND s.completed_at IS NOT NULL AND s.cancelled_at >= :s AND s.cancelled_at < :e", ctx.businessId(), r).query(Long.class).single();
         long[] ret = q("SELECT count(*), coalesce(sum(r.total_minor), 0) FROM sale_return r WHERE " + RETURN_IN_RANGE, ctx.businessId(), r).query((rs, n) -> new long[] {rs.getLong(1), rs.getLong(2)}).single();
         long[] prior = q("SELECT count(*), coalesce(sum(s.total_minor), 0) FROM sale s WHERE " + PRIOR_CANCEL_IN_RANGE, ctx.businessId(), r).query((rs, n) -> new long[] {rs.getLong(1), rs.getLong(2)}).single();
-        return new Sales(v[0], v[1], v[2], v[0] == 0 ? 0 : Math.round((double) v[1] / v[0]), cancelled, ret[0], ret[1], prior[0], prior[1], v[1] - ret[1] - prior[1]);
+        long promo = q("SELECT coalesce(sum(sp.discount_minor), 0) FROM sale s JOIN sale_promotion sp ON sp.sale_id = s.id WHERE " + SALE_IN_RANGE, ctx.businessId(), r).query(Long.class).single();
+        return new Sales(v[0], v[1], v[2], v[0] == 0 ? 0 : Math.round((double) v[1] / v[0]), cancelled, ret[0], ret[1], prior[0], prior[1], v[1] - ret[1] - prior[1], promo);
     }
 
     public List<MethodAmount> byMethod(MemberContext ctx, Range r) {

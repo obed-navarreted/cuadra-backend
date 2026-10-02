@@ -46,7 +46,7 @@ public class SyncService {
     private static final Logger log = LoggerFactory.getLogger(SyncService.class);
     public static final int MAX_OPS = 100;
     /** Rechazos que dependen del momento y pueden dejar de ocurrir sin cambiar la operación. */
-    private static final java.util.Set<String> TRANSIENT_CODES = java.util.Set.of("SALE_LOCKED", "DEVICES_PENDING");
+    private static final java.util.Set<String> TRANSIENT_CODES = java.util.Set.of("SALE_LOCKED", "DEVICES_PENDING", "PIN_VERIFICATION_REQUIRED");
 
     private final JdbcClient jdbc;
     private final TransactionTemplate tx;
@@ -70,12 +70,14 @@ public class SyncService {
     private final com.cuadra.api.tenancy.Access access;
     private final com.cuadra.api.sale.ReturnService returns;
     private final com.cuadra.api.common.Audit audit;
+    private final com.cuadra.api.catalog.PromotionService promotions;
 
-    public SyncService(com.cuadra.api.tenancy.Access access, JdbcClient jdbc, PlatformTransactionManager tm, JsonMapper mapper, Clock clock, ProductService products,
+    public SyncService(com.cuadra.api.catalog.PromotionService promotions, com.cuadra.api.tenancy.Access access, JdbcClient jdbc, PlatformTransactionManager tm, JsonMapper mapper, Clock clock, ProductService products,
                        CategoryService categories, SaleService sales, MemberService members, BusinessService businesses, CustomerService customers,
                        CreditService credits, TemplateService templates, ExpenseService expenses, CashMovementService movements, ShiftService shifts,
                        StockService stock, SupplierService suppliers, PurchaseService purchases, NotificationService notifications,
                        com.cuadra.api.sale.ReturnService returns, com.cuadra.api.common.Audit audit) {
+        this.promotions = promotions;
         this.access = access;
         this.returns = returns;
         this.audit = audit;
@@ -217,6 +219,14 @@ public class SyncService {
                 // Solo los campos que cambió el teléfono (`set`): un teléfono con datos viejos no revierte el precio o el costo que otro cambió.
                 var r = products.patch(ctx, id, op.payload());
                 yield new OpResult(op.opId(), "APPLIED", null, r.product().rev());
+            }
+            case "PROMOTION_UPSERT" -> {
+                var r = promotions.upsert(ctx, id, mapper.treeToValue(op.payload(), com.cuadra.api.catalog.PromotionService.PromotionInput.class));
+                yield new OpResult(op.opId(), "APPLIED", null, r.promotion().rev());
+            }
+            case "PROMOTION_DELETE" -> {
+                promotions.delete(ctx, id);
+                yield new OpResult(op.opId(), "APPLIED", null, null);
             }
             case "CATEGORY_UPSERT" -> {
                 var r = categories.upsert(ctx, id, mapper.treeToValue(op.payload(), CategoryService.CategoryInput.class));
@@ -404,12 +414,12 @@ public class SyncService {
      * Nota: `rev` sale de una secuencia; una transacción larga podría confirmar tarde con un `rev` ya superado. El teléfono
      * vuelve a pedir desde su cursor en cada ciclo, y esa ventana se cerrará con el horizonte de xmin en la fase 9.
      */
-    public PullResult pull(MemberContext ctx, Role deviceTrust, long since, int limit) {
-        return pull(ctx, deviceTrust, since, limit, null);
+    public PullResult pull(MemberContext ctx, boolean device, long since, int limit) {
+        return pull(ctx, device, since, limit, null);
     }
 
     /** `pendingOps`: lo que el teléfono aún tiene sin enviar al bajar (ya después de subir): el cierre del día avisa con este número. */
-    public PullResult pull(MemberContext ctx, Role deviceTrust, long since, int limit, Integer pendingOps) {
+    public PullResult pull(MemberContext ctx, boolean device, long since, int limit, Integer pendingOps) {
         limit = Math.max(1, Math.min(limit, 500));
         boolean cashier = ctx.role() == Role.CASHIER;
         String saleFilter = cashier
@@ -420,6 +430,7 @@ public class SyncService {
                           SELECT rev, 'business' AS t, id FROM business WHERE id = :b AND rev > :s
                           UNION ALL SELECT rev, 'category', id FROM category WHERE business_id = :b AND rev > :s
                           UNION ALL SELECT rev, 'product', id FROM product WHERE business_id = :b AND rev > :s
+                          UNION ALL SELECT rev, 'promotion', id FROM promotion WHERE business_id = :b AND rev > :s
                           UNION ALL SELECT rev, 'member', id FROM member WHERE business_id = :b AND rev > :s
                           UNION ALL SELECT rev, 'cash_register', id FROM cash_register WHERE business_id = :b AND rev > :s
                           UNION ALL SELECT rev, 'customer', id FROM customer WHERE business_id = :b AND rev > :s
@@ -463,6 +474,7 @@ public class SyncService {
         notifications.viewsByIds(ctx.businessId(), idsOf.apply("notification")).forEach(v -> bulk.put(v.id(), v));
         shifts.viewsByIds(ctx, idsOf.apply("shift")).forEach(v -> bulk.put(v.id(), v));
         expenses.categoriesByIds(ctx.businessId(), idsOf.apply("expense_category")).forEach(v -> bulk.put(v.id(), v));
+        promotions.viewsByIds(ctx.businessId(), idsOf.apply("promotion")).forEach(v -> bulk.put(v.id(), v));
         List<Change> changes = new ArrayList<>();
         for (Object[] row : rows) {
             long rev = (Long) row[0];
@@ -480,14 +492,14 @@ public class SyncService {
                 }
                 case "product" -> data = products.get(ctx.businessId(), id);
                 case "member" -> {
-                    if (allMembers == null) allMembers = deviceTrust == null ? members.list(ctx.businessId(), false) : members.listForDevice(ctx.businessId(), deviceTrust);
+                    if (allMembers == null) allMembers = device ? members.listForDevice(ctx.businessId()) : members.list(ctx.businessId(), false);
                     data = allMembers.stream().filter(m -> m.id().equals(id)).findFirst().orElse(null);
                 }
                 case "cash_register" -> {
                     if (registers == null) registers = registers(ctx.businessId());
                     data = registers.get(id);
                 }
-                case "customer", "credit", "credit_payment", "message_template", "expense", "cash_movement", "shift", "expense_category", "stock_movement", "supplier", "purchase", "supplier_payment", "notification" -> data = bulk.get(id);
+                case "customer", "credit", "credit_payment", "message_template", "expense", "cash_movement", "shift", "expense_category", "stock_movement", "supplier", "purchase", "supplier_payment", "notification", "promotion" -> data = bulk.get(id);
                 default -> data = sales.view(ctx.businessId(), id);
             }
             if (data != null) changes.add(new Change(type, rev, data));

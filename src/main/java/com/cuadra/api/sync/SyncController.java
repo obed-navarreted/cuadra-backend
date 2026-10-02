@@ -42,6 +42,6 @@ public class SyncController {
                                        @RequestParam(defaultValue = "0") long since, @RequestParam(defaultValue = "200") int limit,
                                        @RequestParam(required = false) Integer pendingOps) {
         MemberContext ctx = access.member(actor, businessId, memberId);
-        return sync.pull(ctx, actor.isDevice() ? Access.deviceTrust(actor) : null, since, limit, pendingOps == null ? null : Math.max(0, pendingOps));
+        return sync.pull(ctx, actor.isDevice(), since, limit, pendingOps == null ? null : Math.max(0, pendingOps));
     }
 }

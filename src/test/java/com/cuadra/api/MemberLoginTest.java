@@ -18,7 +18,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.web.servlet.ResultActions;
 
 /**
- * Entrar con CÓDIGO DEL NEGOCIO + PIN (sin Google ni usuario: el PIN identifica a la persona) para admins y cajeros creados por el dueño. Un teléfono nunca tiene más poder que quien lo vinculó.
+ * Entrar con CÓDIGO DEL NEGOCIO + PIN (sin Google ni usuario: el PIN identifica a la persona) para admins y cajeros creados por el dueño. Cualquier persona usa cualquier teléfono del negocio (ver `PinElevationTest`).
  */
 class MemberLoginTest extends ApiTestBase {
     @Autowired JdbcClient jdbc;
@@ -54,9 +54,9 @@ class MemberLoginTest extends ApiTestBase {
         mvc.perform(post("/api/auth/member-login").contentType(MediaType.APPLICATION_JSON)
                         .content("{\"businessCode\":\"" + code + "\",\"username\":\"Ana\",\"pin\":\"24681\"}"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.memberId", is(kevin.toString())));
-        // El teléfono ya trabaja como Kevin y recibe SOLO a las personas con las que puede actuar (con el hash del PIN para entrar sin conexión).
-        asDevice(get("/api/b/" + b + "/members"), device, kevin, null).andExpect(status().isOk()).andExpect(jsonPath("$", hasSize(1)))
-                .andExpect(jsonPath("$[0].displayName", is("Kevin"))).andExpect(jsonPath("$[0].pinHash", notNullValue()));
+        // El teléfono ya trabaja como Kevin y recibe a TODAS las personas del negocio (con el hash del PIN para entrar sin conexión): cualquiera puede usarlo.
+        asDevice(get("/api/b/" + b + "/members"), device, kevin, null).andExpect(status().isOk()).andExpect(jsonPath("$", hasSize(3)))
+                .andExpect(jsonPath("$[?(@.displayName=='Kevin')].pinHash", hasSize(1))).andExpect(jsonPath("$[?(@.displayName=='Ana')].pinHash", hasSize(1)));
         asDevice(get("/api/b/" + b + "/plan"), device, kevin, null).andExpect(status().isOk());
         // Una persona dada de baja ya no entra.
         call(put("/api/b/" + b + "/members/" + ana), bearer(owner), "{\"status\":\"DISABLED\"}").andExpect(status().isOk());
@@ -132,34 +132,6 @@ class MemberLoginTest extends ApiTestBase {
         call(put("/api/b/" + b + "/members/" + ownerMember + "/pin"), bearer(owner), "{\"pin\":\"43215\"}").andExpect(status().isNoContent());
         login(codeOf(owner, b), "43215").andExpect(status().isForbidden()).andExpect(jsonPath("$.code", is("OWNER_USES_GOOGLE")));
         login(codeOf(owner, b), "11115").andExpect(status().isUnauthorized());
-    }
-
-    @Test
-    void aPhoneNeverHasMorePowerThanWhoLinkedIt() throws Exception {
-        String owner = login("ml-d");
-        UUID b = createBusiness(owner, "Tienda D");
-        UUID ownerMember = memberIdOf(owner, b);
-        UUID cashier = createPinMember(owner, b, "Kevin", "CASHIER");
-        UUID admin = createPinMember(owner, b, "Ana", "ADMIN");
-        String code = codeOf(owner, b);
-
-        String cashierPhone = tokenOf(login(code, pinOf(b, "Kevin")).andExpect(status().isOk()));
-        // Aunque alguien fabrique la cabecera de un admin o del dueño, el servidor no se lo permite a un teléfono de cajero.
-        assertCode(asDevice(get("/api/b/" + b + "/plan"), cashierPhone, admin, null).andExpect(status().isForbidden()), "DEVICE_NOT_TRUSTED");
-        assertCode(asDevice(get("/api/b/" + b + "/plan"), cashierPhone, ownerMember, null).andExpect(status().isForbidden()), "DEVICE_NOT_TRUSTED");
-        assertCode(asDevice(put("/api/b/" + b + "/members/" + cashier + "/pin"), cashierPhone, ownerMember, "{\"pin\":\"11115\"}").andExpect(status().isForbidden()), "DEVICE_NOT_TRUSTED");
-
-        String adminPhone = tokenOf(login(code, pinOf(b, "Ana")).andExpect(status().isOk()));
-        asDevice(get("/api/b/" + b + "/plan"), adminPhone, admin, null).andExpect(status().isOk());
-        asDevice(get("/api/b/" + b + "/plan"), adminPhone, cashier, null).andExpect(status().isOk());
-        assertCode(asDevice(get("/api/b/" + b + "/plan"), adminPhone, ownerMember, null).andExpect(status().isForbidden()), "DEVICE_NOT_TRUSTED");
-        // El teléfono del admin ve a admin y cajero, no al dueño; el de un teléfono vinculado por el dueño lo ve todo.
-        asDevice(get("/api/b/" + b + "/members"), adminPhone, admin, null).andExpect(jsonPath("$", hasSize(2)));
-        String ownerPhone = linkDevice(owner, b);
-        asDevice(get("/api/b/" + b + "/members"), ownerPhone, ownerMember, null).andExpect(jsonPath("$", hasSize(3)));
-        // La sincronización también respeta el poder del teléfono.
-        String pulled = asDevice(get("/api/b/" + b + "/sync/pull?since=0"), cashierPhone, cashier, null).andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
-        org.junit.jupiter.api.Assertions.assertFalse(pulled.contains("\"Ana\"") || pulled.contains("\"role\":\"OWNER\""), "un teléfono de cajero no debe recibir a los admins ni al dueño");
     }
 
     @Test

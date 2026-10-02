@@ -65,6 +65,15 @@ cuadra:
     # Acceso con usuario y contraseña a la consola. SOLO el hash bcrypt, y solo por entorno (nunca escribirlos aquí).
     admin-user: ${PLATFORM_ADMIN_USER:}
     admin-password-hash: ${PLATFORM_ADMIN_PASSWORD_HASH:}
+  firebase:
+    # Cuenta de servicio de Firebase (proyecto cuentiva-eedb9) para los avisos al instante (FCM). NUNCA en el repositorio:
+    # FIREBASE_SERVICE_ACCOUNT_JSON = el JSON tal cual o en base64 (Railway); FIREBASE_SERVICE_ACCOUNT_FILE = ruta del archivo (desarrollo, en backend/.env.local).
+    # Sin ninguna, el envío queda apagado y los teléfonos se ponen al día con la sincronización frecuente (docs/notas/despliegue.md).
+    service-account-json: ${FIREBASE_SERVICE_ACCOUNT_JSON:}
+    service-account-file: ${FIREBASE_SERVICE_ACCOUNT_FILE:}
+  push:
+    # «Sincroniza ya» juntado por negocio: varios cambios en este lapso salen como un solo aviso.
+    sync-debounce-ms: ${CUADRA_PUSH_SYNC_DEBOUNCE_MS:3000}
   app:
     base-url: ${APP_BASE_URL:http://localhost:5173}
     min-app-version: ${MIN_APP_VERSION:0}

@@ -28,8 +28,11 @@ public class ProductService {
     private final Audit audit;
     private final tools.jackson.databind.json.JsonMapper mapper;
     private final com.cuadra.api.notification.NotificationService notifications;
+    private final com.cuadra.api.push.PushDispatcher push;
 
-    public ProductService(JdbcClient jdbc, Audit audit, tools.jackson.databind.json.JsonMapper mapper, com.cuadra.api.notification.NotificationService notifications) {
+    public ProductService(JdbcClient jdbc, Audit audit, tools.jackson.databind.json.JsonMapper mapper, com.cuadra.api.notification.NotificationService notifications,
+                          com.cuadra.api.push.PushDispatcher push) {
+        this.push = push;
         this.notifications = notifications;
         this.jdbc = jdbc;
         this.audit = audit;
@@ -85,6 +88,7 @@ public class ProductService {
                         .param("active", active).update();
                 priceHistory(ctx, id, p.priceMinor(), p.costMinor());
                 audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "product.create", "product", id, createdDetail(p));
+                push.requestSync(ctx.businessId());
                 return new Result(get(ctx.businessId(), id), Outcome.CREATED);
             }
             ProductView cur = existing.get();
@@ -109,6 +113,7 @@ public class ProductService {
                 if (ctx.role() == com.cuadra.api.tenancy.Role.CASHIER) notifyPriceChanged(ctx, id, cur, p);
             }
             audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "product.update", "product", id, changesDetail(cur, p, active));
+            push.requestSync(ctx.businessId());
             return new Result(get(ctx.businessId(), id), Outcome.UPDATED);
         } catch (DuplicateKeyException e) {
             if (com.cuadra.api.common.Constraints.isPrimaryKey(e)) throw ApiException.conflict("ID_TAKEN", "Id already in use"); // id de otro negocio (invisible por RLS)
@@ -167,6 +172,7 @@ public class ProductService {
                 .param("id", id).param("b", ctx.businessId()).update();
         if (n == 0 && find(ctx.businessId(), id).isEmpty()) throw ApiException.notFound("PRODUCT_NOT_FOUND", "Product not found");
         audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "product.deactivate", "product", id, "{\"changes\":{\"active\":{\"from\":true,\"to\":false}}}");
+        if (n > 0) push.requestSync(ctx.businessId());
     }
 
     public ProductView get(UUID businessId, UUID id) {

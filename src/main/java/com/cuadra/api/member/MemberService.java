@@ -20,7 +20,11 @@ public class MemberService {
     private final com.cuadra.api.plan.PlanService plans;
     private final com.cuadra.api.common.Json json;
 
-    public MemberService(JdbcClient jdbc, PasswordEncoder pinEncoder, Audit audit, com.cuadra.api.plan.PlanService plans, com.cuadra.api.common.Json json) {
+    private final com.cuadra.api.push.PushDispatcher push;
+
+    public MemberService(JdbcClient jdbc, PasswordEncoder pinEncoder, Audit audit, com.cuadra.api.plan.PlanService plans, com.cuadra.api.common.Json json,
+                         com.cuadra.api.push.PushDispatcher push) {
+        this.push = push;
         this.json = json;
         this.jdbc = jdbc;
         this.pinEncoder = pinEncoder;
@@ -36,9 +40,12 @@ public class MemberService {
 
     public record UpdateMember(String displayName, Role role, String status, String color) {}
 
-    /** Lo que ve un teléfono vinculado: solo las personas con las que PUEDE actuar (rol ≤ el de quien lo vinculó), con su hash de PIN. */
-    public List<MemberView> listForDevice(UUID businessId, Role trust) {
-        return list(businessId, true).stream().filter(m -> Role.valueOf(m.role()).atMost(trust)).toList();
+    /**
+     * Lo que ve un teléfono vinculado: TODAS las personas del negocio, con su hash de PIN para desbloquear sin conexión (cualquiera usa cualquier teléfono
+     * del negocio). Actuar por encima del rol base del teléfono exige además que el servidor verifique el PIN en él (ADR 0012, actualización 2026-10-01).
+     */
+    public List<MemberView> listForDevice(UUID businessId) {
+        return list(businessId, true);
     }
 
     /** Dentro de un negocio no puede haber dos personas con el mismo nombre (es el "usuario" con el que se entra): sin distinguir mayúsculas ni espacios. */
@@ -63,6 +70,7 @@ public class MemberService {
 
     @Transactional
     public MemberView createWithPin(MemberContext ctx, CreatePinMember req) {
+        push.requestSync(ctx.businessId());  // los demás teléfonos se ponen al día al instante (solo si se confirma)
         if (req.role() == Role.OWNER) throw ApiException.badRequest("INVALID_ROLE", "A business has a single owner");
         requireManage(ctx, req.role());
         validatePin(req.pin());
@@ -84,6 +92,7 @@ public class MemberService {
 
     @Transactional
     public MemberView update(MemberContext ctx, UUID memberId, UpdateMember req) {
+        push.requestSync(ctx.businessId());  // los demás teléfonos se ponen al día al instante (solo si se confirma)
         MemberView target = get(ctx.businessId(), memberId);
         Role targetRole = Role.valueOf(target.role());
         if (targetRole == Role.OWNER && !ctx.memberId().equals(memberId)) {
@@ -129,6 +138,7 @@ public class MemberService {
             if ("DISABLED".equals(req.status())) {
                 snapshotPhones(ctx.businessId(), memberId);
                 revokePersonalPhones(ctx, memberId);
+                com.cuadra.api.device.DeviceService.revokeGrants(jdbc, ctx.businessId(), null, memberId);
                 // Si la persona también entra con Google (administrador), se cierran todas sus sesiones (web y teléfono).
                 jdbc.sql("""
                                 UPDATE auth_session SET revoked_at = now() WHERE revoked_at IS NULL
@@ -143,6 +153,7 @@ public class MemberService {
 
     @Transactional
     public void resetPin(MemberContext ctx, UUID memberId, String pin, boolean mustChange) {
+        push.requestSync(ctx.businessId());  // los demás teléfonos se ponen al día al instante (solo si se confirma)
         MemberView target = get(ctx.businessId(), memberId);
         Role targetRole = Role.valueOf(target.role());
         if (!ctx.memberId().equals(memberId)) {
@@ -159,6 +170,8 @@ public class MemberService {
                         """)
                 .param("h", pinEncoder.encode(pin)).param("m", mustChange).param("id", memberId).param("b", ctx.businessId()).update();
         markPinConflicts(ctx.businessId(), clashingDisabled);
+        // Con el PIN cambiado, lo verificado con el PIN viejo ya no vale en ningún teléfono.
+        com.cuadra.api.device.DeviceService.revokeGrants(jdbc, ctx.businessId(), null, memberId);
         audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "member.pin_reset", "member", memberId, null);
     }
 
@@ -191,6 +204,7 @@ public class MemberService {
                         """).param("b", ctx.businessId()).param("m", memberId).query(UUID.class).list();
         for (UUID d : phones) {
             jdbc.sql("UPDATE sale SET locked_by_device_id = NULL, locked_until = NULL WHERE locked_by_device_id = :d").param("d", d).update();
+            com.cuadra.api.device.DeviceService.revokeGrants(jdbc, ctx.businessId(), d, null);
             audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "device.revoke", "device", d, "member_disabled");
         }
     }
@@ -198,6 +212,7 @@ public class MemberService {
     /** Traspasa la propiedad a otro miembro con cuenta de Google. Siempre queda un solo dueño activo. */
     @Transactional
     public void transferOwnership(MemberContext ctx, UUID newOwnerId) {
+        push.requestSync(ctx.businessId());  // los demás teléfonos se ponen al día al instante (solo si se confirma)
         ctx.require(Permission.TRANSFER_OWNERSHIP);
         if (ctx.memberId().equals(newOwnerId)) throw ApiException.badRequest("ALREADY_OWNER", "Already the owner");
         var target = jdbc.sql("SELECT user_account_id, status FROM member WHERE id = :id AND business_id = :b")

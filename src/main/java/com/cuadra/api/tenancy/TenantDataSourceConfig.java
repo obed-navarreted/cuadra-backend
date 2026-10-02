@@ -7,7 +7,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.beans.factory.annotation.Value;
-import java.util.UUID;
+import java.util.List;
 
 /** Pone `TenantDataSource` sobre el pool y verifica al arrancar que el aislamiento realmente está activo. `cuadra.rls.enabled=false` lo apaga. */
 @Configuration
@@ -22,16 +22,23 @@ public class TenantDataSourceConfig {
         };
     }
 
-    /** Falla el arranque si el rol restringido no se puede asumir o no restringe (mejor no arrancar que arrancar sin aislamiento). */
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(TenantDataSourceConfig.class);
+
+    /**
+     * Falla el arranque si el aislamiento no protege con el rol EFECTIVO de las peticiones (ver `RlsSelfCheck`): mejor no arrancar que arrancar sin aislamiento.
+     * Deja en el registro con qué rol conecta la API; que sea superusuario es esperado (cada petición de un negocio baja a `cuadra_app`), pero se ve.
+     */
     @Bean
     ApplicationRunner rlsStartupCheck(JdbcClient jdbc, @Value("${cuadra.rls.enabled:true}") boolean enabled) {
         return args -> {
-            if (!enabled) return;
-            UUID probe = UUID.randomUUID();
-            String user = TenantContext.call(probe, () -> jdbc.sql("SELECT current_user").query(String.class).single());
-            long visible = TenantContext.call(probe, () -> jdbc.sql("SELECT count(*) FROM sale").query(Long.class).single());
-            if (!"cuadra_app".equals(user) || visible != 0) {
-                throw new IllegalStateException("El aislamiento por negocio (RLS) no está activo: usuario " + user + ", filas visibles " + visible);
+            if (!enabled) {
+                log.warn("Aislamiento por negocio (RLS) APAGADO (cuadra.rls.enabled=false): solo para desarrollo.");
+                return;
+            }
+            log.info("Base de datos: la API conecta como {}; las peticiones de un negocio bajan al rol {}.", RlsSelfCheck.connectionSummary(jdbc), RlsSelfCheck.APP_ROLE);
+            List<String> problems = RlsSelfCheck.problems(jdbc);
+            if (!problems.isEmpty()) {
+                throw new IllegalStateException("El aislamiento por negocio (RLS) no está activo: " + String.join("; ", problems));
             }
         };
     }

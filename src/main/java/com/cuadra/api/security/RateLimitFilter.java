@@ -23,6 +23,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
 public class RateLimitFilter extends OncePerRequestFilter {
     public record Limits(int authPerMinute, int linkCreatePerMinute, int linkPollPerMinute, int credentialPerMinute) {}
 
+    private static final java.util.regex.Pattern VERIFY_PIN = java.util.regex.Pattern.compile("^/api/devices/me/members/[^/]+/verify-pin$");
+
     private final Clock clock;
     private final Limits limits;
     private final boolean trustForwardedFor;
@@ -46,6 +48,10 @@ public class RateLimitFilter extends OncePerRequestFilter {
         else if (method.equals("POST") && path.equals("/api/auth/google")) { bucket = "auth"; limit = limits.authPerMinute(); }
         else if (method.equals("POST") && path.equals("/api/devices/link-requests")) { bucket = "link-create"; limit = limits.linkCreatePerMinute(); }
         else if (method.equals("GET") && path.startsWith("/api/devices/link-requests/")) { bucket = "link-poll"; limit = limits.linkPollPerMinute(); }
+        // Verificar un PIN en el teléfono: pocas veces por minuto y por teléfono (además del bloqueo por persona y por negocio).
+        else if (method.equals("POST") && VERIFY_PIN.matcher(path).matches() && request.getHeader("Authorization") != null) {
+            bucket = "cred:verify-pin:" + request.getHeader("Authorization").hashCode(); limit = Math.min(10, limits.authPerMinute());
+        }
         else if (request.getHeader("Authorization") != null) { bucket = "cred:" + request.getHeader("Authorization").hashCode(); limit = limits.credentialPerMinute(); }
         else { chain.doFilter(request, response); return; }
         String key = bucket.startsWith("cred:") ? bucket : bucket + "|" + clientIp(request);

@@ -35,10 +35,11 @@ public class Access {
                     .query((rs, n) -> new MemberContext(businessId, rs.getObject("id", UUID.class),
                             Role.valueOf(rs.getString("role")), null, actor.deviceId()))
                     .optional().orElseThrow(() -> ApiException.forbidden("MEMBER_NOT_ACTIVE", "Member not active in this business"));
-            // Un teléfono nunca tiene más poder que quien lo vinculó: uno vinculado por un cajero solo actúa como cajero, aunque alguien
-            // fabrique la cabecera X-Member-Id de un admin o del dueño (el PIN se valida en el teléfono, así que el servidor no puede fiarse de la cabecera).
-            if (!ctx.role().atMost(deviceTrust(actor))) throw ApiException.forbidden("DEVICE_NOT_TRUSTED", "This phone cannot act with that role");
-            return ctx;
+            // Cualquier persona del negocio usa cualquier teléfono del negocio con su PIN. Pero el PIN se comprueba en el teléfono, así que la cabecera
+            // X-Member-Id sola no basta para actuar POR ENCIMA del rol base del teléfono (el de quien lo vinculó): para eso el servidor tiene que haber
+            // comprobado el PIN de esa persona en este teléfono (permiso vigente, `verify-pin`). Sin él actúa con el rol base: vende y cobra igual, y lo
+            // demás responde PIN_VERIFICATION_REQUIRED (ADR 0012, actualización 2026-10-01).
+            return elevate(ctx, actor);
         }
         return userMember(actor.userId(), businessId).orElseThrow(Access::notFound);
     }
@@ -66,7 +67,7 @@ public class Access {
                 .param("m", memberHeader).param("b", businessId)
                 .query((rs, n) -> new MemberContext(businessId, rs.getObject("id", UUID.class), Role.valueOf(rs.getString("role")), null, actor.deviceId()))
                 .optional().orElseThrow(() -> ApiException.forbidden("MEMBER_NOT_ACTIVE", "Member not active in this business"));
-        if (ctx != null && !ctx.role().atMost(trust)) throw ApiException.forbidden("DEVICE_NOT_TRUSTED", "This phone cannot act with that role");
+        if (ctx != null) ctx = elevate(ctx, actor);
         if (ctx == null) ctx = new MemberContext(businessId, null, Role.CASHIER, null, actor.deviceId());
         java.time.Instant linkedAt = jdbc.sql("SELECT linked_at FROM device WHERE id = :d").param("d", actor.deviceId())
                 .query((rs, n) -> rs.getTimestamp(1).toInstant()).optional().orElse(null);
@@ -76,7 +77,8 @@ public class Access {
     /**
      * La persona con la que se aplica UNA operación de la cola: la que la hizo (guardada en el teléfono al hacerla), no la que está activa al enviarla.
      * - Con sesión de usuario (web) solo puede ser quien envía.
-     * - Con teléfono: debe ser del negocio y no tener más poder que el teléfono (`trust_role`); si fue dada de baja, solo vale lo hecho ANTES de la baja
+     * - Con teléfono: debe ser del negocio; por encima del rol base del teléfono (`trust_role`) solo con un permiso de PIN verificado que cubra la hora de
+     *   la operación (si no, con el rol base); si fue dada de baja, solo vale lo hecho ANTES de la baja
      *   (`createdAt` es la hora del teléfono al hacerla). El teléfono revocado por esa baja solo envía lo hecho antes de la revocación.
      */
     public MemberContext actingFor(Pusher p, UUID memberId, java.time.Instant createdAt, java.util.Map<UUID, Object[]> cache) {
@@ -89,12 +91,67 @@ public class Access {
         Object[] row = memberRow(p, who, cache);
         if (row.length == 0) throw ApiException.forbidden("MEMBER_NOT_ACTIVE", "Member not active in this business");
         Role role = (Role) row[0];
-        if (!role.atMost(p.deviceTrust())) throw ApiException.forbidden("DEVICE_NOT_TRUSTED", "This phone cannot act with that role");
         if (p.drainUntil() != null && (createdAt == null || createdAt.isAfter(p.drainUntil()))) {
             throw ApiException.forbidden("ACCESS_DISABLED", "This phone was disabled before this operation");
         }
         if ("DISABLED".equals(row[1])) requirePlausibleBeforeDisable(p, (java.time.Instant) row[2], (String) row[3], createdAt);
-        return new MemberContext(p.ctx().businessId(), who, role, null, p.ctx().deviceId());
+        MemberContext acting = new MemberContext(p.ctx().businessId(), who, role, null, p.ctx().deviceId());
+        if (role.atMost(p.deviceTrust()) || grantCovers(p, who, createdAt)) return acting;
+        return acting.capped(p.deviceTrust());
+    }
+
+    // ---------- elevación por PIN verificado ----------
+
+    /** Cuánto dura un permiso desde su último uso. */
+    public static final java.time.Duration GRANT_TTL = java.time.Duration.ofHours(12);
+    /** Un permiso solo se corre si le quedan menos de esto para llegar a {@link #GRANT_TTL} (no se escribe en cada petición). */
+    private static final java.time.Duration GRANT_SLIDE_STEP = java.time.Duration.ofMinutes(5);
+
+    /** Con teléfono: su rol real si no supera el rol base o si tiene un permiso VIGENTE en este teléfono (que se corre al usarse); si no, el rol base. */
+    private MemberContext elevate(MemberContext ctx, Actor actor) {
+        Role base = deviceTrust(actor);
+        if (ctx.role().atMost(base)) return ctx;
+        java.time.Instant now = java.time.Instant.now();
+        // Correr el vencimiento solo si hace falta (casi todas las peticiones solo leen): se escribe como mucho cada pocos minutos.
+        java.sql.Timestamp ts = java.sql.Timestamp.from(now);
+        java.time.Instant expires = jdbc.sql("""
+                        SELECT max(expires_at) FROM device_member_grant
+                         WHERE device_id = :d AND member_id = :m AND business_id = :b AND revoked_at IS NULL AND expires_at > :now
+                        """)
+                .param("d", actor.deviceId()).param("m", ctx.memberId()).param("b", ctx.businessId()).param("now", ts)
+                .query((rs, n) -> java.util.Optional.ofNullable(rs.getTimestamp(1)).map(java.sql.Timestamp::toInstant)).single().orElse(null);
+        if (expires != null && expires.isBefore(now.plus(GRANT_TTL).minus(GRANT_SLIDE_STEP))) {
+            jdbc.sql("""
+                            UPDATE device_member_grant SET expires_at = :e
+                             WHERE device_id = :d AND member_id = :m AND business_id = :b AND revoked_at IS NULL AND expires_at > :now
+                            """)
+                    .param("e", java.sql.Timestamp.from(now.plus(GRANT_TTL))).param("d", actor.deviceId()).param("m", ctx.memberId()).param("b", ctx.businessId())
+                    .param("now", ts).update();
+        }
+        boolean alive = expires != null;
+        return alive ? ctx : ctx.capped(base);
+    }
+
+    /**
+     * ¿Hubo en ESTE teléfono un permiso de esta persona cuando hizo la operación (`createdAt`, hora del teléfono)? Lo hecho sin conexión mientras el permiso
+     * valía se acepta después aunque ya venció. Plausibilidad: no antes de vincular el teléfono ni en el futuro. Además, si la persona vuelve a confirmar
+     * su PIN en el teléfono (permiso vigente), lo que quedó en su cola sin permiso en las últimas {@link #LATE_WINDOW} se acepta: lo confirma ella.
+     */
+    private boolean grantCovers(Pusher p, UUID who, java.time.Instant createdAt) {
+        if (createdAt == null || p.ctx().deviceId() == null) return false;
+        java.time.Instant now = java.time.Instant.now();
+        if (createdAt.isAfter(now.plus(CLOCK_SKEW))) return false;
+        if (p.deviceLinkedAt() != null && createdAt.isBefore(p.deviceLinkedAt().minus(CLOCK_SKEW))) return false;
+        java.sql.Timestamp at = java.sql.Timestamp.from(createdAt);
+        return jdbc.sql("""
+                        SELECT count(*) FROM device_member_grant
+                         WHERE device_id = :d AND member_id = :m AND business_id = :b AND (
+                               (granted_at - interval '5 minutes' <= :at AND :at <= LEAST(expires_at, COALESCE(revoked_at, expires_at)) + interval '5 minutes')
+                            OR (revoked_at IS NULL AND expires_at > :now AND granted_at >= :at AND :at >= :lateFloor))
+                        """)
+                .param("d", p.ctx().deviceId()).param("m", who).param("b", p.ctx().businessId()).param("at", at)
+                .param("now", java.sql.Timestamp.from(now)).param("lateFloor", java.sql.Timestamp.from(now.minus(LATE_WINDOW)))
+                .query(Integer.class).single() > 0;
     }
 
     private Object[] memberRow(Pusher p, UUID who, java.util.Map<UUID, Object[]> cache) {
@@ -150,6 +207,7 @@ public class Access {
         }
     }
 
+    /** El rol BASE del teléfono: el de quien lo vinculó. Por encima de él, solo con PIN verificado por el servidor en ese teléfono. */
     public static Role deviceTrust(Actor actor) {
         return actor.deviceTrust() == null ? Role.OWNER : Role.valueOf(actor.deviceTrust());
     }

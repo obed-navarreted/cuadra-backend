@@ -84,6 +84,33 @@ class AuthzSweepTest extends ApiTestBase {
         assertEquals(List.of(), bad.stream().distinct().toList());
     }
 
+    /**
+     * Elevación por PIN verificado (ADR 0012, 2026-10-01): en un teléfono vinculado por un cajero, el dueño SIN su PIN verificado en ese teléfono nunca puede
+     * más que el cajero: donde al cajero se le niega (403), al dueño también (y con PIN_VERIFICATION_REQUIRED cuando su rol sí podría). Nunca DEVICE_NOT_TRUSTED.
+     */
+    @Test
+    void onACashierPhoneAnUnverifiedOwnerNeverGetsMoreThanTheCashier() throws Exception {
+        String owner = login("sweep-d");
+        UUID b = createBusiness(owner, "Barrido D");
+        UUID ownerMember = memberIdOf(owner, b);
+        UUID kevin = createPinMember(owner, b, "Kevin", "CASHIER");
+        String code = com.jayway.jsonpath.JsonPath.read(mvc.perform(MockMvcRequestBuilders.get("/api/b/" + b).header("Authorization", bearer(owner))).andReturn().getResponse().getContentAsString(), "$.accessCode");
+        String phone = com.jayway.jsonpath.JsonPath.read(mvc.perform(MockMvcRequestBuilders.post("/api/auth/member-login").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"businessCode\":\"" + code + "\",\"pin\":\"" + pinOf(b, "Kevin") + "\",\"deviceName\":\"Caja\"}")).andReturn().getResponse().getContentAsString(), "$.deviceToken");
+        List<String> bad = new ArrayList<>();
+        int pinRequired = 0;
+        for (Route r : routes("/api/b/{businessId}")) {
+            var asKevin = mvc.perform(build(r, b).header("Authorization", "Device " + phone).header("X-Member-Id", kevin.toString())).andReturn().getResponse();
+            var asOwner = mvc.perform(build(r, b).header("Authorization", "Device " + phone).header("X-Member-Id", ownerMember.toString())).andReturn().getResponse();
+            String body = asOwner.getContentAsString();
+            if (body.contains("DEVICE_NOT_TRUSTED")) bad.add(r.method() + " " + r.pattern() + " → DEVICE_NOT_TRUSTED");
+            if (asKevin.getStatus() == 403 && asOwner.getStatus() != 403) bad.add(r.method() + " " + r.pattern() + " → cajero 403, dueño sin verificar " + asOwner.getStatus());
+            if (body.contains("PIN_VERIFICATION_REQUIRED")) pinRequired++;
+        }
+        assertEquals(List.of(), bad);
+        assertTrue(pinRequired > 20, "se esperaba PIN_VERIFICATION_REQUIRED en las rutas de administración, hubo " + pinRequired);
+    }
+
     @Test
     void thePlatformConsoleDoesNotExistForOrdinaryUsers() throws Exception {
         String user = login("sweep-c");

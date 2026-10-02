@@ -5,3 +5,6 @@ target/
 .env.local
 .env.*
 backups/
+
+# Claves privadas (Firebase y otras): nunca al repositorio
+/secrets/

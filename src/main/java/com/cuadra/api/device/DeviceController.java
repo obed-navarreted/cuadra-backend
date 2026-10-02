@@ -65,6 +65,29 @@ public class DeviceController {
                 new DeviceService.LinkRequestInfo(body.deviceName(), body.model(), body.osVersion(), body.appVersion()));
     }
 
+    public record VerifyPinBody(@NotBlank @Size(max = 10) String pin) {}
+
+    /** El teléfono se describe a sí mismo: su rol base y los permisos de PIN verificado vigentes (ADR 0012, actualización 2026-10-01). */
+    @GetMapping("/devices/me")
+    public DeviceService.DeviceSelf me(@AuthenticationPrincipal Actor actor) {
+        requireDevice(actor);
+        return devices.self(actor.deviceId(), actor.deviceBusinessId());
+    }
+
+    /**
+     * El servidor comprueba el PIN de una persona del negocio en este teléfono y le da un permiso corto para actuar con su rol aunque el teléfono lo haya
+     * vinculado alguien con menos rol. Bloqueo por persona y por negocio; límite por teléfono y minuto.
+     */
+    @PostMapping("/devices/me/members/{memberId}/verify-pin")
+    public DeviceService.VerifiedPin verifyPin(@AuthenticationPrincipal Actor actor, @PathVariable UUID memberId, @Valid @RequestBody VerifyPinBody body) {
+        requireDevice(actor);
+        return devices.verifyPin(actor.deviceId(), actor.deviceBusinessId(), memberId, body.pin());
+    }
+
+    private static void requireDevice(Actor actor) {
+        if (actor == null || !actor.isDevice() || actor.isViewAs()) throw com.cuadra.api.common.ApiException.forbidden("DEVICE_REQUIRED", "Only a linked phone can do this");
+    }
+
     @GetMapping("/b/{businessId}/devices")
     public List<DeviceService.DeviceView> list(@AuthenticationPrincipal Actor actor, @PathVariable UUID businessId,
                                                @RequestHeader(value = Access.MEMBER_HEADER, required = false) UUID memberHeader) {

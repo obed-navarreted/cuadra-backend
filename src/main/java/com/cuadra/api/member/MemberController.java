@@ -46,7 +46,7 @@ public class MemberController {
     @GetMapping("/members")
     public List<MemberService.MemberView> list(@AuthenticationPrincipal Actor actor, @PathVariable UUID businessId) {
         access.businessAccess(actor, businessId);
-        return actor.isDevice() ? members.listForDevice(businessId, com.cuadra.api.tenancy.Access.deviceTrust(actor)) : members.list(businessId, false);
+        return actor.isDevice() ? members.listForDevice(businessId) : members.list(businessId, false);
     }
 
     @PostMapping("/members")

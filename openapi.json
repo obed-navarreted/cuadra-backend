@@ -375,6 +375,9 @@
             },
             "type" : [ "array", "null" ]
           },
+          "registerCheckout" : {
+            "type" : "boolean"
+          },
           "shiftNoteThresholdMinor" : {
             "format" : "int64",
             "type" : [ "integer", "null" ]
@@ -392,7 +395,7 @@
             "type" : [ "string", "null" ]
           }
         },
-        "required" : [ "creditLimitEnforced", "creditOverdueDays", "creditRequiresCustomer", "currencyLocked", "id", "shiftRequired" ],
+        "required" : [ "creditLimitEnforced", "creditOverdueDays", "creditRequiresCustomer", "currencyLocked", "id", "registerCheckout", "shiftRequired" ],
         "type" : "object"
       },
       "ByCategory" : {
@@ -967,6 +970,14 @@
             "format" : "int64",
             "type" : "integer"
           },
+          "pendingCheckoutCount" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "pendingCheckoutMinor" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
           "priorCancelledCashMinor" : {
             "format" : "int64",
             "type" : "integer"
@@ -976,6 +987,10 @@
             "type" : "integer"
           },
           "priorCancelledMinor" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "promotionDiscountMinor" : {
             "format" : "int64",
             "type" : "integer"
           },
@@ -1010,7 +1025,7 @@
             "type" : "integer"
           }
         },
-        "required" : [ "cancelledCount", "cancelledMinor", "cashRefundsMinor", "depositsMinor", "drawerExpensesMinor", "expectedCashMinor", "netSalesMinor", "otherExpensesMinor", "priorCancelledCashMinor", "priorCancelledCount", "priorCancelledMinor", "returnsCount", "returnsMinor", "salesCount", "salesMinor", "withdrawalsMinor" ],
+        "required" : [ "cancelledCount", "cancelledMinor", "cashRefundsMinor", "depositsMinor", "drawerExpensesMinor", "expectedCashMinor", "netSalesMinor", "otherExpensesMinor", "pendingCheckoutCount", "pendingCheckoutMinor", "priorCancelledCashMinor", "priorCancelledCount", "priorCancelledMinor", "promotionDiscountMinor", "returnsCount", "returnsMinor", "salesCount", "salesMinor", "withdrawalsMinor" ],
         "type" : "object"
       },
       "DayPoint" : {
@@ -1069,6 +1084,31 @@
           }
         },
         "required" : [ "balanceMinor", "oldestDays", "paidLast90Minor" ],
+        "type" : "object"
+      },
+      "DeviceSelf" : {
+        "properties" : {
+          "baseRole" : {
+            "type" : [ "string", "null" ]
+          },
+          "businessId" : {
+            "format" : "uuid",
+            "type" : [ "string", "null" ]
+          },
+          "deviceId" : {
+            "format" : "uuid",
+            "type" : [ "string", "null" ]
+          },
+          "grants" : {
+            "items" : {
+              "$ref" : "#/components/schemas/Grant"
+            },
+            "type" : [ "array", "null" ]
+          },
+          "kind" : {
+            "type" : [ "string", "null" ]
+          }
+        },
         "type" : "object"
       },
       "DeviceSync" : {
@@ -1347,6 +1387,23 @@
           }
         },
         "required" : [ "idToken" ],
+        "type" : "object"
+      },
+      "Grant" : {
+        "properties" : {
+          "expiresAt" : {
+            "format" : "date-time",
+            "type" : [ "string", "null" ]
+          },
+          "grantedAt" : {
+            "format" : "date-time",
+            "type" : [ "string", "null" ]
+          },
+          "memberId" : {
+            "format" : "uuid",
+            "type" : [ "string", "null" ]
+          }
+        },
         "type" : "object"
       },
       "ImportBody" : {
@@ -3768,6 +3825,101 @@
         "required" : [ "costCoveragePercent", "costOfGoodsMinor", "estimatedProfitMinor", "operatingExpensesMinor", "purchasesExcludedMinor", "salesMinor" ],
         "type" : "object"
       },
+      "PromotionActiveBody" : {
+        "properties" : {
+          "active" : {
+            "type" : [ "boolean", "null" ]
+          }
+        },
+        "type" : "object"
+      },
+      "PromotionInput" : {
+        "properties" : {
+          "active" : {
+            "type" : [ "boolean", "null" ]
+          },
+          "endsOn" : {
+            "format" : "date",
+            "type" : [ "string", "null" ]
+          },
+          "name" : {
+            "type" : [ "string", "null" ]
+          },
+          "priceMinor" : {
+            "format" : "int64",
+            "type" : [ "integer", "null" ]
+          },
+          "productIds" : {
+            "items" : {
+              "format" : "uuid",
+              "type" : "string"
+            },
+            "type" : [ "array", "null" ]
+          },
+          "quantity" : {
+            "format" : "int32",
+            "type" : [ "integer", "null" ]
+          },
+          "startsOn" : {
+            "format" : "date",
+            "type" : [ "string", "null" ]
+          }
+        },
+        "type" : "object"
+      },
+      "PromotionView" : {
+        "properties" : {
+          "active" : {
+            "type" : "boolean"
+          },
+          "deleted" : {
+            "type" : "boolean"
+          },
+          "endsOn" : {
+            "format" : "date",
+            "type" : [ "string", "null" ]
+          },
+          "id" : {
+            "format" : "uuid",
+            "type" : "string"
+          },
+          "name" : {
+            "type" : [ "string", "null" ]
+          },
+          "priceMinor" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "productIds" : {
+            "items" : {
+              "format" : "uuid",
+              "type" : "string"
+            },
+            "type" : [ "array", "null" ]
+          },
+          "quantity" : {
+            "format" : "int32",
+            "type" : "integer"
+          },
+          "rev" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "startsOn" : {
+            "format" : "date",
+            "type" : [ "string", "null" ]
+          },
+          "state" : {
+            "type" : [ "string", "null" ]
+          },
+          "updatedAt" : {
+            "format" : "date-time",
+            "type" : [ "string", "null" ]
+          }
+        },
+        "required" : [ "active", "deleted", "id", "priceMinor", "quantity", "rev" ],
+        "type" : "object"
+      },
       "PublicConfig" : {
         "properties" : {
           "announcement" : {
@@ -4215,10 +4367,76 @@
             },
             "type" : [ "array", "null" ]
           },
+          "promotions" : {
+            "items" : {
+              "$ref" : "#/components/schemas/SalePromotionInput"
+            },
+            "type" : [ "array", "null" ]
+          },
+          "sendToRegister" : {
+            "type" : [ "boolean", "null" ]
+          },
           "status" : {
             "type" : [ "string", "null" ]
           }
         },
+        "type" : "object"
+      },
+      "SalePromotionInput" : {
+        "properties" : {
+          "discountMinor" : {
+            "format" : "int64",
+            "type" : [ "integer", "null" ]
+          },
+          "name" : {
+            "type" : [ "string", "null" ]
+          },
+          "priceMinor" : {
+            "format" : "int64",
+            "type" : [ "integer", "null" ]
+          },
+          "promotionId" : {
+            "format" : "uuid",
+            "type" : [ "string", "null" ]
+          },
+          "quantity" : {
+            "format" : "int32",
+            "type" : [ "integer", "null" ]
+          },
+          "units" : {
+            "format" : "int32",
+            "type" : [ "integer", "null" ]
+          }
+        },
+        "type" : "object"
+      },
+      "SalePromotionView" : {
+        "properties" : {
+          "discountMinor" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "name" : {
+            "type" : [ "string", "null" ]
+          },
+          "priceMinor" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "promotionId" : {
+            "format" : "uuid",
+            "type" : [ "string", "null" ]
+          },
+          "quantity" : {
+            "format" : "int32",
+            "type" : "integer"
+          },
+          "units" : {
+            "format" : "int32",
+            "type" : "integer"
+          }
+        },
+        "required" : [ "discountMinor", "priceMinor", "quantity", "units" ],
         "type" : "object"
       },
       "SaleView" : {
@@ -4287,6 +4505,9 @@
           "label" : {
             "type" : [ "string", "null" ]
           },
+          "lockedBy" : {
+            "$ref" : "#/components/schemas/MemberRef"
+          },
           "lockedByDeviceId" : {
             "format" : "uuid",
             "type" : [ "string", "null" ]
@@ -4298,6 +4519,19 @@
           "payments" : {
             "items" : {
               "$ref" : "#/components/schemas/PaymentView"
+            },
+            "type" : [ "array", "null" ]
+          },
+          "pendingCheckout" : {
+            "type" : "boolean"
+          },
+          "promotionDiscountMinor" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "promotions" : {
+            "items" : {
+              "$ref" : "#/components/schemas/SalePromotionView"
             },
             "type" : [ "array", "null" ]
           },
@@ -4318,6 +4552,13 @@
           "reviewFlag" : {
             "type" : [ "string", "null" ]
           },
+          "sentBy" : {
+            "$ref" : "#/components/schemas/MemberRef"
+          },
+          "sentToRegisterAt" : {
+            "format" : "date-time",
+            "type" : [ "string", "null" ]
+          },
           "status" : {
             "type" : [ "string", "null" ]
           },
@@ -4334,7 +4575,7 @@
             "type" : [ "string", "null" ]
           }
         },
-        "required" : [ "discountMinor", "id", "returnedMinor", "rev", "subtotalMinor", "totalMinor" ],
+        "required" : [ "discountMinor", "id", "pendingCheckout", "promotionDiscountMinor", "returnedMinor", "rev", "subtotalMinor", "totalMinor" ],
         "type" : "object"
       },
       "Sales" : {
@@ -4367,6 +4608,10 @@
             "format" : "int64",
             "type" : "integer"
           },
+          "promotionDiscountMinor" : {
+            "format" : "int64",
+            "type" : "integer"
+          },
           "returnsCount" : {
             "format" : "int64",
             "type" : "integer"
@@ -4380,7 +4625,7 @@
             "type" : "integer"
           }
         },
-        "required" : [ "averageTicketMinor", "cancelledCount", "count", "discountMinor", "netMinor", "priorCancelledCount", "priorCancelledMinor", "returnsCount", "returnsMinor", "totalMinor" ],
+        "required" : [ "averageTicketMinor", "cancelledCount", "count", "discountMinor", "netMinor", "priorCancelledCount", "priorCancelledMinor", "promotionDiscountMinor", "returnsCount", "returnsMinor", "totalMinor" ],
         "type" : "object"
       },
       "SalesReport" : {
@@ -5028,6 +5273,9 @@
             },
             "type" : [ "array", "null" ]
           },
+          "registerCheckout" : {
+            "type" : [ "boolean", "null" ]
+          },
           "shiftNoteThresholdMinor" : {
             "format" : "int64",
             "type" : [ "integer", "null" ]
@@ -5092,6 +5340,40 @@
           }
         },
         "required" : [ "devices", "members", "schedules" ],
+        "type" : "object"
+      },
+      "VerifiedPin" : {
+        "properties" : {
+          "baseRole" : {
+            "type" : [ "string", "null" ]
+          },
+          "expiresAt" : {
+            "format" : "date-time",
+            "type" : [ "string", "null" ]
+          },
+          "grantedAt" : {
+            "format" : "date-time",
+            "type" : [ "string", "null" ]
+          },
+          "memberId" : {
+            "format" : "uuid",
+            "type" : [ "string", "null" ]
+          },
+          "role" : {
+            "type" : [ "string", "null" ]
+          }
+        },
+        "type" : "object"
+      },
+      "VerifyPinBody" : {
+        "properties" : {
+          "pin" : {
+            "maxLength" : 10,
+            "minLength" : 0,
+            "type" : [ "string", "null" ]
+          }
+        },
+        "required" : [ "pin" ],
         "type" : "object"
       }
     }
@@ -5405,7 +5687,7 @@
     },
     "/api/b/{businessId}/activity" : {
       "get" : {
-        "operationId" : "list_5",
+        "operationId" : "list_6",
         "parameters" : [ {
           "in" : "path",
           "name" : "businessId",
@@ -5866,7 +6148,7 @@
     },
     "/api/b/{businessId}/credits" : {
       "get" : {
-        "operationId" : "list_4",
+        "operationId" : "list_5",
         "parameters" : [ {
           "in" : "path",
           "name" : "businessId",
@@ -6411,7 +6693,7 @@
     },
     "/api/b/{businessId}/devices" : {
       "get" : {
-        "operationId" : "list_3",
+        "operationId" : "list_4",
         "parameters" : [ {
           "in" : "path",
           "name" : "businessId",
@@ -7424,7 +7706,7 @@
     },
     "/api/b/{businessId}/notification-schedules/{id}/active" : {
       "post" : {
-        "operationId" : "setActive",
+        "operationId" : "setActive_1",
         "parameters" : [ {
           "in" : "path",
           "name" : "businessId",
@@ -7654,7 +7936,7 @@
     },
     "/api/b/{businessId}/notifications" : {
       "get" : {
-        "operationId" : "list_2",
+        "operationId" : "list_3",
         "parameters" : [ {
           "in" : "path",
           "name" : "businessId",
@@ -8121,7 +8403,7 @@
         "tags" : [ "catalog-controller" ]
       },
       "get" : {
-        "operationId" : "get_2",
+        "operationId" : "get_3",
         "parameters" : [ {
           "in" : "path",
           "name" : "businessId",
@@ -8162,7 +8444,7 @@
         "tags" : [ "catalog-controller" ]
       },
       "put" : {
-        "operationId" : "upsert_1",
+        "operationId" : "upsert_2",
         "parameters" : [ {
           "in" : "path",
           "name" : "businessId",
@@ -8318,6 +8600,225 @@
           }
         },
         "tags" : [ "stock-controller" ]
+      }
+    },
+    "/api/b/{businessId}/promotions" : {
+      "get" : {
+        "operationId" : "list_2",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "businessId",
+          "required" : true,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        }, {
+          "in" : "header",
+          "name" : "X-Member-Id",
+          "required" : false,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "items" : {
+                    "$ref" : "#/components/schemas/PromotionView"
+                  },
+                  "type" : "array"
+                }
+              }
+            },
+            "description" : "OK"
+          }
+        },
+        "tags" : [ "promotion-controller" ]
+      }
+    },
+    "/api/b/{businessId}/promotions/{id}" : {
+      "delete" : {
+        "operationId" : "delete_2",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "businessId",
+          "required" : true,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        }, {
+          "in" : "path",
+          "name" : "id",
+          "required" : true,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        }, {
+          "in" : "header",
+          "name" : "X-Member-Id",
+          "required" : false,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "204" : {
+            "description" : "No Content"
+          }
+        },
+        "tags" : [ "promotion-controller" ]
+      },
+      "get" : {
+        "operationId" : "get_2",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "businessId",
+          "required" : true,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        }, {
+          "in" : "path",
+          "name" : "id",
+          "required" : true,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        }, {
+          "in" : "header",
+          "name" : "X-Member-Id",
+          "required" : false,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/PromotionView"
+                }
+              }
+            },
+            "description" : "OK"
+          }
+        },
+        "tags" : [ "promotion-controller" ]
+      },
+      "put" : {
+        "operationId" : "upsert_1",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "businessId",
+          "required" : true,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        }, {
+          "in" : "path",
+          "name" : "id",
+          "required" : true,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        }, {
+          "in" : "header",
+          "name" : "X-Member-Id",
+          "required" : false,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        } ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/PromotionInput"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/PromotionView"
+                }
+              }
+            },
+            "description" : "OK"
+          }
+        },
+        "tags" : [ "promotion-controller" ]
+      }
+    },
+    "/api/b/{businessId}/promotions/{id}/active" : {
+      "post" : {
+        "operationId" : "setActive",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "businessId",
+          "required" : true,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        }, {
+          "in" : "path",
+          "name" : "id",
+          "required" : true,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        }, {
+          "in" : "header",
+          "name" : "X-Member-Id",
+          "required" : false,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        } ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/PromotionActiveBody"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/PromotionView"
+                }
+              }
+            },
+            "description" : "OK"
+          }
+        },
+        "tags" : [ "promotion-controller" ]
       }
     },
     "/api/b/{businessId}/purchases" : {
@@ -9718,6 +10219,44 @@
         "tags" : [ "sale-controller" ]
       }
     },
+    "/api/b/{businessId}/sales/register-queue" : {
+      "get" : {
+        "operationId" : "registerQueue",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "businessId",
+          "required" : true,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        }, {
+          "in" : "header",
+          "name" : "X-Member-Id",
+          "required" : false,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "items" : {
+                    "$ref" : "#/components/schemas/SaleView"
+                  },
+                  "type" : "array"
+                }
+              }
+            },
+            "description" : "OK"
+          }
+        },
+        "tags" : [ "sale-controller" ]
+      }
+    },
     "/api/b/{businessId}/sales/summary" : {
       "get" : {
         "operationId" : "summary",
@@ -10811,7 +11350,7 @@
     },
     "/api/config" : {
       "get" : {
-        "operationId" : "get_3",
+        "operationId" : "get_4",
         "responses" : {
           "200" : {
             "content" : {
@@ -10900,6 +11439,61 @@
               "*/*" : {
                 "schema" : {
                   "$ref" : "#/components/schemas/LinkStatus"
+                }
+              }
+            },
+            "description" : "OK"
+          }
+        },
+        "tags" : [ "device-controller" ]
+      }
+    },
+    "/api/devices/me" : {
+      "get" : {
+        "operationId" : "me_1",
+        "responses" : {
+          "200" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/DeviceSelf"
+                }
+              }
+            },
+            "description" : "OK"
+          }
+        },
+        "tags" : [ "device-controller" ]
+      }
+    },
+    "/api/devices/me/members/{memberId}/verify-pin" : {
+      "post" : {
+        "operationId" : "verifyPin",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "memberId",
+          "required" : true,
+          "schema" : {
+            "format" : "uuid",
+            "type" : "string"
+          }
+        } ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/VerifyPinBody"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/VerifiedPin"
                 }
               }
             },

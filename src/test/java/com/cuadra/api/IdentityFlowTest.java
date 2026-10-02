@@ -256,7 +256,7 @@ class IdentityFlowTest extends ApiTestBase {
     }
 
     @Test
-    void ownerLinksTheirOwnPhoneWithoutACodeAndAnAdminOnlyWithGoogle() throws Exception {
+    void anyoneWithGoogleLinksTheirOwnPhoneWithoutACode() throws Exception {
         String owner = login("selfa");
         UUID b = createBusiness(owner, "Tienda Self");
         String json = call(post("/api/b/" + b + "/devices/self"), bearer(owner), "{\"deviceName\":\"Mi teléfono\",\"model\":\"Pixel\"}")
@@ -266,9 +266,10 @@ class IdentityFlowTest extends ApiTestBase {
         // El token recién emitido ya funciona; y el negocio lo lista.
         call(get("/api/b/" + b + "/members"), "Device " + token, null).andExpect(status().isOk());
         call(get("/api/b/" + b + "/devices"), bearer(owner), null).andExpect(jsonPath("$", hasSize(1)));
-        // Un cajero (aunque tenga Google) no puede vincular teléfonos; un teléfono no vincula otros sin código.
+        // Un cajero con Google también puede usar SU teléfono para el negocio (rol base: cajero); un teléfono no vincula otros sin código.
         String cashier = joinAs(owner, b, "selfb", "CASHIER");
-        call(post("/api/b/" + b + "/devices/self"), bearer(cashier), "{\"deviceName\":\"X\"}").andExpect(status().isForbidden());
+        call(post("/api/b/" + b + "/devices/self"), bearer(cashier), "{\"deviceName\":\"X\"}").andExpect(status().isCreated());
+        org.junit.jupiter.api.Assertions.assertEquals("CASHIER", baseJdbc.sql("SELECT trust_role FROM device WHERE business_id = :b AND name = 'X'").param("b", b).query(String.class).single());
         mvc.perform(post("/api/b/" + b + "/devices/self").header("Authorization", "Device " + token).header("X-Member-Id", memberIdOf(owner, b).toString())
                 .contentType(org.springframework.http.MediaType.APPLICATION_JSON).content("{\"deviceName\":\"Y\"}")).andExpect(status().isForbidden());
     }

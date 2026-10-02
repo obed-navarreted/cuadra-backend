@@ -49,9 +49,12 @@ public class SaleService {
     private final com.cuadra.api.stock.StockService stock;
     private final com.cuadra.api.notification.NotificationService notifications;
     private final ReturnService returns;
+    private final com.cuadra.api.push.PushDispatcher push;
 
     public SaleService(JdbcClient jdbc, Audit audit, Clock clock, BusinessDayService days, CreditService credits, com.cuadra.api.cash.RegisterResolver registers,
-                       com.cuadra.api.stock.StockService stock, com.cuadra.api.notification.NotificationService notifications, ReturnService returns) {
+                       com.cuadra.api.stock.StockService stock, com.cuadra.api.notification.NotificationService notifications, ReturnService returns,
+                       com.cuadra.api.push.PushDispatcher push) {
+        this.push = push;
         this.returns = returns;
         this.jdbc = jdbc;
         this.audit = audit;
@@ -76,12 +79,37 @@ public class SaleService {
      * esa cuenta ya se cobró (distinta) o se descartó en otro teléfono, esta venta NO se descarta ni pisa la otra: se guarda aparte para revisar.
      */
     public record SaleInput(String status, String label, UUID cashRegisterId, Long discountMinor, Instant createdAt,
-                            Instant completedAt, List<ItemInput> items, List<PaymentInput> payments, String fromStatus) {
+                            Instant completedAt, List<ItemInput> items, List<PaymentInput> payments, String fromStatus,
+                            /**
+                             * Cobro en caja (ADR 0015), solo con status PARKED: true = "Enviar a caja" (queda en «Por cobrar en caja»; la nota es `label`);
+                             * false = vuelve a ser una cuenta apartada común; ausente = no cambia.
+                             */
+                            Boolean sendToRegister,
+                            /**
+                             * Promociones por cantidad que el teléfono aplicó (PENDIENTES.md, «Promociones por cantidad»): su descuento ya va repartido en el
+                             * `discountMinor` de las líneas. El servidor NO vuelve a calcular precios: solo comprueba que las sumas cuadren.
+                             */
+                            List<SalePromotionInput> promotions) {
+        public SaleInput(String status, String label, UUID cashRegisterId, Long discountMinor, Instant createdAt, Instant completedAt, List<ItemInput> items,
+                         List<PaymentInput> payments, String fromStatus, Boolean sendToRegister) {
+            this(status, label, cashRegisterId, discountMinor, createdAt, completedAt, items, payments, fromStatus, sendToRegister, null);
+        }
+
+        public SaleInput(String status, String label, UUID cashRegisterId, Long discountMinor, Instant createdAt, Instant completedAt, List<ItemInput> items,
+                         List<PaymentInput> payments, String fromStatus) {
+            this(status, label, cashRegisterId, discountMinor, createdAt, completedAt, items, payments, fromStatus, null);
+        }
+
         public SaleInput(String status, String label, UUID cashRegisterId, Long discountMinor, Instant createdAt, Instant completedAt, List<ItemInput> items,
                          List<PaymentInput> payments) {
-            this(status, label, cashRegisterId, discountMinor, createdAt, completedAt, items, payments, null);
+            this(status, label, cashRegisterId, discountMinor, createdAt, completedAt, items, payments, null, null);
         }
     }
+
+    /** Una promoción aplicada en la venta: «3 por C$ 100» (`quantity`, `priceMinor`), cuántas unidades entraron en paquetes y cuánto se descontó. */
+    public record SalePromotionInput(UUID promotionId, String name, Integer quantity, Long priceMinor, Integer units, Long discountMinor) {}
+
+    public record SalePromotionView(UUID promotionId, String name, int quantity, long priceMinor, int units, long discountMinor) {}
 
     /** `returnedMilli`: cuánto de esta línea ya se devolvió (se puede devolver hasta `quantityMilli − returnedMilli`). */
     public record ItemView(UUID id, UUID productId, String barcode, String name, String variant, long unitPriceMinor,
@@ -102,7 +130,15 @@ public class SaleService {
                            /** Para revisar: LATE_AFTER_DISABLE (llegó después de la baja de quien la hizo) o CLOCK_ADJUSTED (el teléfono tenía la hora imposible). */
                            String reviewFlag,
                            /** Lo devuelto de esta venta (cada devolución cuenta en la jornada en que se hizo) y su suma. */
-                           long returnedMinor, List<ReturnService.ReturnView> returns) {}
+                           long returnedMinor, List<ReturnService.ReturnView> returns,
+                           /** Cobro en caja (ADR 0015): cuándo y quién la envió a caja. Una PARKED con `sentToRegisterAt` está «Por cobrar en caja». */
+                           Instant sentToRegisterAt, MemberRef sentBy,
+                           /** Quién la tiene abierta en su teléfono ahora («La está cobrando Ana»); solo mientras `lockedUntil` no pasó. */
+                           MemberRef lockedBy,
+                           /** ¿Está en la lista «Por cobrar en caja»? (PARKED y enviada a caja) */
+                           boolean pendingCheckout,
+                           /** Promociones por cantidad aplicadas (su descuento ya está en las líneas) y su suma. */
+                           List<SalePromotionView> promotions, long promotionDiscountMinor) {}
 
     /** CONFLICT_COPY: la versión que llegó chocó con otra ya cobrada o descartada y se guardó como venta NUEVA (`sale()` es esa copia). */
     public enum Outcome { CREATED, UPDATED, UNCHANGED, STALE, CONFLICT_COPY }
@@ -118,11 +154,44 @@ public class SaleService {
     private record NPayment(UUID id, String method, String otherLabel, long amount, Long tendered, Long change, String reference,
                             String debtorLabel, String debtorPhone, UUID customerId) {}
 
+    private record NPromo(UUID promotionId, String name, int quantity, long price, int units, long discount) {}
+
     private record Norm(String status, String label, UUID register, long discount, List<NItem> items, List<NPayment> payments,
-                        long subtotal, long total, Instant createdAt, Instant completedAt) {
+                        long subtotal, long total, Instant createdAt, Instant completedAt, boolean pendingCheckout, List<NPromo> promotions) {
         Norm withRegister(UUID r) {
-            return new Norm(status, label, r, discount, items, payments, subtotal, total, createdAt, completedAt);
+            return new Norm(status, label, r, discount, items, payments, subtotal, total, createdAt, completedAt, pendingCheckout, promotions);
         }
+
+        Norm withPending(boolean p) {
+            return new Norm(status, label, register, discount, items, payments, subtotal, total, createdAt, completedAt, p, promotions);
+        }
+    }
+
+    private static final int MAX_PROMOTIONS = 50;
+
+    /**
+     * Las promociones que trae la venta: datos sanos y que su descuento no pase del descuento que llevan las líneas (allí ya está repartido). No se
+     * comprueba contra la promoción vigente: una venta hecha sin conexión con una promoción vieja se acepta tal como se cobró.
+     */
+    private static List<NPromo> promotions(SaleInput in, List<NItem> items) {
+        List<SalePromotionInput> raw = in.promotions() == null ? List.of() : in.promotions();
+        if (raw.isEmpty()) return List.of();
+        if (raw.size() > MAX_PROMOTIONS) throw ApiException.badRequest("TOO_MANY_PROMOTIONS", "Too many promotions");
+        List<NPromo> out = new ArrayList<>();
+        long sum = 0;
+        for (SalePromotionInput p : raw) {
+            String name = p.name() == null ? "" : p.name().trim();
+            if (name.isEmpty() || name.length() > 200) throw ApiException.badRequest("INVALID_PROMOTION", "Promotion name is required (max 200)");
+            if (p.quantity() == null || p.quantity() < 2) throw ApiException.badRequest("INVALID_PROMOTION", "Promotion quantity must be 2 or more");
+            if (p.priceMinor() == null || p.priceMinor() < 0 || p.priceMinor() > SaleMath.MAX_MINOR) throw ApiException.badRequest("INVALID_PROMOTION", "Invalid promotion price");
+            if (p.units() == null || p.units() < p.quantity() || p.units() % p.quantity() != 0) throw ApiException.badRequest("INVALID_PROMOTION", "Promotion units must be whole packs");
+            if (p.discountMinor() == null || p.discountMinor() <= 0) throw ApiException.badRequest("INVALID_PROMOTION", "Invalid promotion discount");
+            sum = Math.addExact(sum, p.discountMinor());
+            out.add(new NPromo(p.promotionId(), name, p.quantity(), p.priceMinor(), p.units(), p.discountMinor()));
+        }
+        long lineDiscounts = items.stream().mapToLong(NItem::discount).sum();
+        if (sum > lineDiscounts) throw ApiException.badRequest("PROMOTION_MISMATCH", "Promotion discounts (" + sum + ") exceed the line discounts (" + lineDiscounts + ")");
+        return out;
     }
 
     private Norm normalize(SaleInput in, Instant now, UUID businessId) {
@@ -199,14 +268,17 @@ public class SaleService {
         if ("COMPLETED".equals(status)) {
             completed = in.completedAt() == null || in.completedAt().isAfter(now.plus(CLOCK_SKEW)) ? now : in.completedAt();
         }
-        return new Norm(status, in.label() == null || in.label().isBlank() ? null : in.label().trim(), in.cashRegisterId(), discount, items, pays, subtotal,
-                total, created, completed);
+        String label = in.label() == null || in.label().isBlank() ? null : in.label().trim();
+        if (label != null && label.length() > 120) throw ApiException.badRequest("INVALID_LABEL", "Note too long (max 120)");
+        return new Norm(status, label, in.cashRegisterId(), discount, items, pays, subtotal, total, created, completed, false, promotions(in, items));
     }
 
     /** Huella del contenido: repetir exactamente lo mismo no cambia nada ni sube la revisión. */
     private static String hash(Norm n) {
         StringBuilder sb = new StringBuilder();
         sb.append(n.status).append('|').append(n.label).append('|').append(n.register).append('|').append(n.discount).append('|').append(n.completedAt);
+        // Solo si está por cobrar en caja: las huellas de las cuentas de siempre no cambian.
+        if (n.pendingCheckout) sb.append("|R");
         for (NItem i : n.items) {
             sb.append("|I").append(i.in.id()).append(',').append(i.in.productId()).append(',').append(i.in.barcode()).append(',').append(i.name)
                     .append(',').append(i.in.variant()).append(',').append(i.price).append(',').append(i.in.unitCostMinor()).append(',').append(i.qty)
@@ -216,12 +288,17 @@ public class SaleService {
             sb.append("|P").append(p.id).append(',').append(p.method).append(',').append(p.otherLabel).append(',').append(p.amount).append(',')
                     .append(p.tendered).append(',').append(p.reference).append(',').append(p.debtorLabel).append(',').append(p.debtorPhone).append(',').append(p.customerId);
         }
+        // Solo con promociones: las huellas de las ventas de siempre no cambian.
+        for (NPromo p : n.promotions) {
+            sb.append("|M").append(p.promotionId()).append(',').append(p.name()).append(',').append(p.quantity()).append(',').append(p.price()).append(',')
+                    .append(p.units()).append(',').append(p.discount());
+        }
         return TokenHasher.hash(sb.toString());
     }
 
     // ---------- operaciones ----------
 
-    private record Row(String status, String hash, UUID lockedBy, Instant lockedUntil) {}
+    private record Row(String status, String hash, UUID lockedBy, Instant lockedUntil, boolean pending, UUID lockedMember) {}
 
     @Transactional
     public Result upsert(MemberContext ctx, UUID id, SaleInput in) {
@@ -237,13 +314,26 @@ public class SaleService {
         UUID keep = n.register != null ? n.register : jdbc.sql("SELECT cash_register_id FROM sale WHERE id = :id AND business_id = :b").param("id", id).param("b", ctx.businessId())
                 .query((rs, i) -> rs.getObject(1, UUID.class)).optional().orElse(null);
         n = n.withRegister(registers.resolve(ctx, keep));
-        String hash = hash(n);
 
-        Row row = jdbc.sql("SELECT status, content_hash, locked_by_device_id, locked_until FROM sale WHERE id = :id AND business_id = :b FOR UPDATE")
+        Row row = jdbc.sql("SELECT status, content_hash, locked_by_device_id, locked_until, sent_to_register_at, locked_by_member_id FROM sale WHERE id = :id AND business_id = :b FOR UPDATE")
                 .param("id", id).param("b", ctx.businessId())
                 .query((rs, i) -> new Row(rs.getString("status"), rs.getString("content_hash"), rs.getObject("locked_by_device_id", UUID.class),
-                        rs.getTimestamp("locked_until") == null ? null : rs.getTimestamp("locked_until").toInstant()))
+                        rs.getTimestamp("locked_until") == null ? null : rs.getTimestamp("locked_until").toInstant(), rs.getTimestamp("sent_to_register_at") != null,
+                        rs.getObject("locked_by_member_id", UUID.class)))
                 .optional().orElse(null);
+        // Cobro en caja: solo una cuenta apartada puede estar «por cobrar en caja». Sin indicarlo se conserva lo que tenía (una versión vieja de la app,
+        // o el teléfono que la retomó y la vuelve a apartar). Con el ajuste del negocio apagado no se envía a caja: desde la cola (sin conexión, la
+        // persona ya no está mirando) se guarda como cuenta apartada común para no perderla; directo se rechaza.
+        boolean pending = false;
+        if ("PARKED".equals(n.status)) {
+            pending = in.sendToRegister() != null ? in.sendToRegister() : row != null && row.pending;
+            if (Boolean.TRUE.equals(in.sendToRegister()) && !registerCheckoutOn(ctx.businessId())) {
+                if (opId == null) throw ApiException.conflict("COBRO_EN_CAJA_OFF", "Register checkout is turned off for this business");
+                pending = row != null && row.pending;
+            }
+        }
+        n = n.withPending(pending);
+        String hash = hash(n);
 
         if (row == null) {
             ctx.require(Permission.SELL);
@@ -290,22 +380,31 @@ public class SaleService {
 
         ctx.require(Permission.SELL);
         if (row.lockedBy != null && row.lockedUntil != null && row.lockedUntil.isAfter(now) && !row.lockedBy.equals(ctx.deviceId())) {
-            throw ApiException.conflict("SALE_LOCKED", "This ticket is open on another phone");
+            throw locked(row.lockedMember);
         }
         boolean completing = "COMPLETED".equals(n.status);
+        // Enviada (o reenviada) a caja: cuándo y quién. Vuelta a cuenta común: se borra. Cobrada o sin cambio: se conserva (quién la envió queda en la venta).
+        String sent = "PARKED".equals(n.status) && Boolean.TRUE.equals(in.sendToRegister()) && n.pendingCheckout
+                ? "sent_to_register_at = :now, sent_by_member_id = :me,"
+                : "PARKED".equals(n.status) && !n.pendingCheckout ? "sent_to_register_at = NULL, sent_by_member_id = NULL," : "";
         UUID day = completing ? days.idFor(ctx.businessId(), n.completedAt) : null;
         jdbc.sql("""
                         UPDATE sale SET status = :st, label = :label, cash_register_id = :reg, subtotal_minor = :sub, discount_minor = :disc, total_minor = :tot,
                                completed_by_member_id = :cby, completed_at = :cat, business_day_id = :day, locked_by_device_id = NULL, locked_until = NULL,
+                               locked_by_member_id = NULL, """ + sent + """
                                content_hash = :hash, updated_at = :now, rev = nextval('change_rev_seq')
                          WHERE id = :id AND business_id = :b
                         """)
                 .param("st", n.status).param("label", n.label).param("reg", n.register, java.sql.Types.OTHER).param("sub", n.subtotal).param("disc", n.discount)
                 .param("tot", n.total).param("cby", completing ? ctx.memberId() : null, java.sql.Types.OTHER)
                 .param("cat", n.completedAt == null ? null : Timestamp.from(n.completedAt), java.sql.Types.TIMESTAMP).param("day", day, java.sql.Types.OTHER)
-                .param("hash", hash).param("now", Timestamp.from(now)).param("id", id).param("b", ctx.businessId()).update();
+                .param("hash", hash).param("now", Timestamp.from(now)).param("id", id).param("b", ctx.businessId())
+                .param("me", ctx.memberId(), java.sql.Types.OTHER).update();
         replaceChildren(ctx.businessId(), id, n);
         stock.reconcileSale(ctx, id);
+        // «Por cobrar en caja» cambió (llegó, se cobró o volvió a ser común): los demás teléfonos la ven al instante.
+        if (n.pendingCheckout || row.pending) push.requestSync(ctx.businessId());
+        if (!sent.isEmpty() && sent.contains(":now")) audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "sale.send_to_register", "sale", id, "total=" + n.total);
         if (completing) {
             credits.syncSaleCredits(ctx, id, saleCredits(n), n.completedAt);
             audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "sale.complete", "sale", id, "total=" + n.total);
@@ -317,16 +416,22 @@ public class SaleService {
         UUID day = n.completedAt == null ? null : days.idFor(ctx.businessId(), n.completedAt);
         jdbc.sql("""
                         INSERT INTO sale (id, business_id, cash_register_id, device_id, business_day_id, status, label, subtotal_minor, discount_minor,
-                                          total_minor, created_by_member_id, completed_by_member_id, completed_at, content_hash, created_at, updated_at, conflict_of_sale_id)
-                        VALUES (:id, :b, :reg, :dev, :day, :st, :label, :sub, :disc, :tot, :by, :cby, :cat, :hash, :created, :now, :conflict)
+                                          total_minor, created_by_member_id, completed_by_member_id, completed_at, content_hash, created_at, updated_at, conflict_of_sale_id,
+                                          sent_to_register_at, sent_by_member_id)
+                        VALUES (:id, :b, :reg, :dev, :day, :st, :label, :sub, :disc, :tot, :by, :cby, :cat, :hash, :created, :now, :conflict, :sent, :sentBy)
                         """)
                 .param("id", id).param("b", ctx.businessId()).param("reg", n.register, java.sql.Types.OTHER).param("dev", ctx.deviceId(), java.sql.Types.OTHER)
                 .param("day", day, java.sql.Types.OTHER).param("st", n.status).param("label", n.label).param("sub", n.subtotal).param("disc", n.discount)
                 .param("tot", n.total).param("by", ctx.memberId()).param("cby", "COMPLETED".equals(n.status) ? ctx.memberId() : null, java.sql.Types.OTHER)
                 .param("cat", n.completedAt == null ? null : Timestamp.from(n.completedAt), java.sql.Types.TIMESTAMP)
-                .param("hash", hash).param("created", Timestamp.from(n.createdAt)).param("now", Timestamp.from(now)).param("conflict", conflictOf, java.sql.Types.OTHER).update();
+                .param("hash", hash).param("created", Timestamp.from(n.createdAt)).param("now", Timestamp.from(now)).param("conflict", conflictOf, java.sql.Types.OTHER)
+                .param("sent", n.pendingCheckout ? Timestamp.from(now) : null, java.sql.Types.TIMESTAMP).param("sentBy", n.pendingCheckout ? ctx.memberId() : null, java.sql.Types.OTHER).update();
         replaceChildren(ctx.businessId(), id, n);
         stock.reconcileSale(ctx, id);
+        if (n.pendingCheckout) {
+            audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "sale.send_to_register", "sale", id, "total=" + n.total);
+            push.requestSync(ctx.businessId());
+        }
         if ("COMPLETED".equals(n.status)) {
             credits.syncSaleCredits(ctx, id, saleCredits(n), n.completedAt);
             audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "sale.complete", "sale", id, "total=" + n.total);
@@ -348,7 +453,7 @@ public class SaleService {
                 i.in.unitPriceMinor(), i.in.unitCostMinor(), i.in.quantityMilli(), i.in.discountMinor()), i.name, i.price, i.qty, i.discount, i.lineTotal)).toList();
         List<NPayment> pays = n.payments.stream().map(p -> new NPayment(derive.apply(p.id), p.method, p.otherLabel, p.amount, p.tendered, p.change, p.reference,
                 p.debtorLabel, p.debtorPhone, p.customerId)).toList();
-        Norm copy = new Norm(n.status, n.label, n.register, n.discount, items, pays, n.subtotal, n.total, n.createdAt, n.completedAt);
+        Norm copy = new Norm(n.status, n.label, n.register, n.discount, items, pays, n.subtotal, n.total, n.createdAt, n.completedAt, false, n.promotions);
         insertNew(ctx, copyId, copy, hash(copy), now, originalId);
         audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), "sale.conflict_copy", "sale", copyId, "of=" + originalId + " total=" + n.total);
         String member = ctx.memberId() == null ? "" : jdbc.sql("SELECT display_name FROM member WHERE id = :m").param("m", ctx.memberId()).query(String.class).optional().orElse("");
@@ -363,6 +468,18 @@ public class SaleService {
                 .map(p -> new CreditService.SaleCredit(p.id, p.amount, p.debtorLabel, p.debtorPhone, p.customerId)).toList();
     }
 
+    private boolean registerCheckoutOn(UUID businessId) {
+        return jdbc.sql("SELECT register_checkout FROM business WHERE id = :b").param("b", businessId).query(Boolean.class).single();
+    }
+
+    /** «La está cobrando Ana»: el rechazo dice quién la tiene abierta (si se sabe). */
+    private ApiException locked(UUID member) {
+        ApiException e = ApiException.conflict("SALE_LOCKED", "This ticket is open on another phone");
+        if (member == null) return e;
+        String name = jdbc.sql("SELECT display_name FROM member WHERE id = :m").param("m", member).query(String.class).optional().orElse(null);
+        return name == null ? e : e.with("memberName", name);
+    }
+
     private boolean requiresCustomer(UUID businessId) {
         return jdbc.sql("SELECT credit_requires_customer FROM business WHERE id = :b").param("b", businessId).query(Boolean.class).single();
     }
@@ -374,7 +491,16 @@ public class SaleService {
     private void replaceChildren(UUID businessId, UUID saleId, Norm n) {
         jdbc.sql("DELETE FROM sale_item WHERE sale_id = :s").param("s", saleId).update();
         jdbc.sql("DELETE FROM sale_payment WHERE sale_id = :s").param("s", saleId).update();
+        jdbc.sql("DELETE FROM sale_promotion WHERE sale_id = :s").param("s", saleId).update();
         int pos = 0;
+        for (NPromo p : n.promotions) {
+            jdbc.sql("""
+                            INSERT INTO sale_promotion (sale_id, business_id, position, promotion_id, name, quantity, price_minor, units, discount_minor)
+                            VALUES (:s, :b, :pos, :p, :n, :q, :price, :u, :d)""")
+                    .param("s", saleId).param("b", businessId).param("pos", pos++).param("p", p.promotionId(), java.sql.Types.OTHER).param("n", p.name())
+                    .param("q", p.quantity()).param("price", p.price()).param("u", p.units()).param("d", p.discount()).update();
+        }
+        pos = 0;
         for (NItem i : n.items) {
             jdbc.sql("""
                             INSERT INTO sale_item (id, sale_id, business_id, product_id, barcode, name, variant, unit_price_minor, unit_cost_minor,
@@ -410,12 +536,17 @@ public class SaleService {
      */
     @Transactional
     public SaleView cancel(MemberContext ctx, UUID id, String reason, Instant requestedAt) {
-        var row = jdbc.sql("SELECT status, completed_at, completed_by_member_id, device_id FROM sale WHERE id = :id AND business_id = :b FOR UPDATE").param("id", id).param("b", ctx.businessId())
-                .query((rs, n) -> new Object[] {rs.getString(1), rs.getTimestamp(2), rs.getObject(3, UUID.class), rs.getObject(4, UUID.class)})
+        var row = jdbc.sql("SELECT status, completed_at, completed_by_member_id, device_id, sent_to_register_at FROM sale WHERE id = :id AND business_id = :b FOR UPDATE").param("id", id).param("b", ctx.businessId())
+                .query((rs, n) -> new Object[] {rs.getString(1), rs.getTimestamp(2), rs.getObject(3, UUID.class), rs.getObject(4, UUID.class), rs.getTimestamp(5)})
                 .optional().orElseThrow(() -> ApiException.notFound("SALE_NOT_FOUND", "Sale not found"));
         String status = (String) row[0];
         if ("CANCELLED".equals(status)) return view(ctx.businessId(), id);
         boolean completed = "COMPLETED".equals(status);
+        // Anular una cuenta por cobrar en caja (no es una venta, pero alguien la tomó y se esperaba su dinero): con motivo, queda en la actividad.
+        boolean pendingCheckout = "PARKED".equals(status) && row[4] != null;
+        if (pendingCheckout && (reason == null || reason.trim().length() < 5)) {
+            throw ApiException.badRequest("REASON_REQUIRED", "A reason of at least 5 characters is required to cancel a ticket sent to the register");
+        }
         Instant now = clock.instant();
         Instant completedAt = row[1] == null ? null : ((Timestamp) row[1]).toInstant();
         boolean undo = false;
@@ -441,13 +572,14 @@ public class SaleService {
         if (completed && requestedAt != null && completedAt != null) at = requestedAt.isAfter(now) ? now : requestedAt.isBefore(completedAt) ? completedAt : requestedAt;
         jdbc.sql("""
                         UPDATE sale SET status = 'CANCELLED', cancelled_by_member_id = :m, cancelled_at = :at, cancel_reason = :r, locked_by_device_id = NULL,
-                               locked_until = NULL, updated_at = :now, rev = nextval('change_rev_seq') WHERE id = :id AND business_id = :b
+                               locked_until = NULL, locked_by_member_id = NULL, updated_at = :now, rev = nextval('change_rev_seq') WHERE id = :id AND business_id = :b
                         """)
                 .param("m", ctx.memberId()).param("at", Timestamp.from(at)).param("now", Timestamp.from(now)).param("r", reason == null || reason.isBlank() ? null : reason.trim())
                 .param("id", id).param("b", ctx.businessId()).update();
         stock.reconcileSale(ctx, id);
         if (completed) notifySaleDeleted(ctx, id, undo, reason == null ? "" : reason.trim());
-        audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), undo ? "sale.undo" : "sale.cancel", "sale", id, status + (reason == null ? "" : ": " + reason));
+        if (pendingCheckout) push.requestSync(ctx.businessId());
+        audit.log(ctx.businessId(), ctx.memberId(), ctx.userId(), ctx.deviceId(), undo ? "sale.undo" : pendingCheckout ? "sale.register_cancel" : "sale.cancel", "sale", id, status + (reason == null ? "" : ": " + reason));
         return view(ctx.businessId(), id);
     }
 
@@ -499,24 +631,25 @@ public class SaleService {
         ctx.require(Permission.SELL);
         if (ctx.deviceId() == null) throw ApiException.badRequest("DEVICE_REQUIRED", "Only a linked phone can hold a ticket");
         Instant now = clock.instant();
-        var row = jdbc.sql("SELECT status, locked_by_device_id, locked_until FROM sale WHERE id = :id AND business_id = :b FOR UPDATE")
+        var row = jdbc.sql("SELECT status, locked_by_device_id, locked_until, locked_by_member_id FROM sale WHERE id = :id AND business_id = :b FOR UPDATE")
                 .param("id", id).param("b", ctx.businessId())
-                .query((rs, i) -> new Object[] {rs.getString("status"), rs.getObject("locked_by_device_id", UUID.class), rs.getTimestamp("locked_until")})
+                .query((rs, i) -> new Object[] {rs.getString("status"), rs.getObject("locked_by_device_id", UUID.class), rs.getTimestamp("locked_until"),
+                        rs.getObject("locked_by_member_id", UUID.class)})
                 .optional().orElseThrow(() -> ApiException.notFound("SALE_NOT_FOUND", "Sale not found"));
         if (!"PARKED".equals(row[0])) throw ApiException.conflict("SALE_NOT_PARKED", "Only parked tickets can be resumed");
         UUID holder = (UUID) row[1];
         Timestamp until = (Timestamp) row[2];
         if (holder != null && !holder.equals(ctx.deviceId()) && until != null && until.toInstant().isAfter(now)) {
-            throw ApiException.conflict("SALE_LOCKED", "This ticket is open on another phone");
+            throw locked((UUID) row[3]);
         }
-        jdbc.sql("UPDATE sale SET locked_by_device_id = :d, locked_until = :u WHERE id = :id").param("d", ctx.deviceId())
-                .param("u", Timestamp.from(now.plus(LOCK_TTL))).param("id", id).update();
+        jdbc.sql("UPDATE sale SET locked_by_device_id = :d, locked_until = :u, locked_by_member_id = :m WHERE id = :id").param("d", ctx.deviceId())
+                .param("u", Timestamp.from(now.plus(LOCK_TTL))).param("m", ctx.memberId(), java.sql.Types.OTHER).param("id", id).update();
         return view(ctx.businessId(), id);
     }
 
     @Transactional
     public void unlock(MemberContext ctx, UUID id) {
-        jdbc.sql("UPDATE sale SET locked_by_device_id = NULL, locked_until = NULL WHERE id = :id AND business_id = :b AND locked_by_device_id = :d")
+        jdbc.sql("UPDATE sale SET locked_by_device_id = NULL, locked_until = NULL, locked_by_member_id = NULL WHERE id = :id AND business_id = :b AND locked_by_device_id = :d")
                 .param("id", id).param("b", ctx.businessId()).param("d", ctx.deviceId(), java.sql.Types.OTHER).update();
     }
 
@@ -615,7 +748,7 @@ public class SaleService {
                 .param("b", ctx.businessId()).param("s", start).param("e", end);
         if (own) totalsQ = totalsQ.param("me", ctx.memberId());
         long[] totals = totalsQ.query((rs, i) -> new long[] {rs.getLong("n"), rs.getLong("total")}).single();
-        var cancelQ = jdbc.sql("SELECT count(*) FROM sale s WHERE s.business_id = :b AND s.status = 'CANCELLED' AND s.cancelled_at >= :s AND s.cancelled_at < :e"
+        var cancelQ = jdbc.sql("SELECT count(*) FROM sale s WHERE s.business_id = :b AND s.status = 'CANCELLED' AND s.completed_at IS NOT NULL AND s.cancelled_at >= :s AND s.cancelled_at < :e"
                         + (own ? " AND s.cancelled_by_member_id = :me" : ""))
                 .param("b", ctx.businessId()).param("s", start).param("e", end);
         if (own) cancelQ = cancelQ.param("me", ctx.memberId());
@@ -625,12 +758,14 @@ public class SaleService {
     private List<SaleView> load(UUID businessId, String clause, Map<String, Object> params, String tail, int limit) {
         var q = jdbc.sql("""
                         SELECT s.*, mc.display_name AS created_name, mk.display_name AS completed_name, me.display_name AS edited_name,
-                               mx.display_name AS cancelled_name
+                               mx.display_name AS cancelled_name, ms.display_name AS sent_name, ml.display_name AS locked_name
                           FROM sale s
                           JOIN member mc ON mc.id = s.created_by_member_id
                           LEFT JOIN member mk ON mk.id = s.completed_by_member_id
                           LEFT JOIN member me ON me.id = s.edited_by_member_id
                           LEFT JOIN member mx ON mx.id = s.cancelled_by_member_id
+                          LEFT JOIN member ms ON ms.id = s.sent_by_member_id
+                          LEFT JOIN member ml ON ml.id = s.locked_by_member_id
                          WHERE s.business_id = :b""" + " AND " + clause + tail).param("b", businessId);
         for (var e : params.entrySet()) q = q.param(e.getKey(), e.getValue());
         List<SaleView> heads = q.query((rs, i) -> new SaleView(rs.getObject("id", UUID.class), rs.getString("status"), rs.getString("label"),
@@ -640,7 +775,8 @@ public class SaleService {
                 ref(rs, "edited_by_member_id", "edited_name"), instant(rs, "edited_at"), ref(rs, "cancelled_by_member_id", "cancelled_name"),
                 instant(rs, "cancelled_at"), rs.getString("cancel_reason"), rs.getObject("locked_by_device_id", UUID.class), instant(rs, "locked_until"),
                 instant(rs, "created_at"), instant(rs, "updated_at"), rs.getLong("rev"), List.of(), List.of(), rs.getObject("conflict_of_sale_id", UUID.class),
-                rs.getString("review_flag"), 0, List.of())).list();
+                rs.getString("review_flag"), 0, List.of(), instant(rs, "sent_to_register_at"), ref(rs, "sent_by_member_id", "sent_name"),
+                activeLock(rs) ? ref(rs, "locked_by_member_id", "locked_name") : null, false, List.of(), 0)).list();
         if (heads.isEmpty()) return heads;
 
         List<UUID> ids = heads.stream().map(SaleView::id).toList();
@@ -657,6 +793,12 @@ public class SaleService {
                     (Long) rs.getObject("unit_cost_minor"), qty, disc, SaleMath.lineTotal(price, qty, disc), returnedByItem.getOrDefault(rs.getObject("id", UUID.class), 0L)));
             return null;
         }).list();
+        Map<UUID, List<SalePromotionView>> promos = new LinkedHashMap<>();
+        jdbc.sql("SELECT * FROM sale_promotion WHERE sale_id IN (:ids) ORDER BY sale_id, position").param("ids", ids).query((rs, i) -> {
+            promos.computeIfAbsent(rs.getObject("sale_id", UUID.class), k -> new ArrayList<>()).add(new SalePromotionView(rs.getObject("promotion_id", UUID.class),
+                    rs.getString("name"), rs.getInt("quantity"), rs.getLong("price_minor"), rs.getInt("units"), rs.getLong("discount_minor")));
+            return null;
+        }).list();
         Map<UUID, List<PaymentView>> pays = new LinkedHashMap<>();
         jdbc.sql("SELECT * FROM sale_payment WHERE sale_id IN (:ids) ORDER BY sale_id, position").param("ids", ids).query((rs, i) -> {
             pays.computeIfAbsent(rs.getObject("sale_id", UUID.class), k -> new ArrayList<>()).add(new PaymentView(rs.getObject("id", UUID.class),
@@ -669,7 +811,19 @@ public class SaleService {
                 h.discountMinor(), h.totalMinor(), h.createdBy(), h.completedBy(), h.completedAt(), h.editedBy(), h.editedAt(), h.cancelledBy(),
                 h.cancelledAt(), h.cancelReason(), h.lockedByDeviceId(), h.lockedUntil(), h.createdAt(), h.updatedAt(), h.rev(),
                 items.getOrDefault(h.id(), List.of()), pays.getOrDefault(h.id(), List.of()), h.conflictOfSaleId(), h.reviewFlag(),
-                saleReturns.getOrDefault(h.id(), List.of()).stream().mapToLong(ReturnService.ReturnView::totalMinor).sum(), saleReturns.getOrDefault(h.id(), List.of()))).collect(Collectors.toList());
+                saleReturns.getOrDefault(h.id(), List.of()).stream().mapToLong(ReturnService.ReturnView::totalMinor).sum(), saleReturns.getOrDefault(h.id(), List.of()),
+                h.sentToRegisterAt(), h.sentBy(), h.lockedBy(), "PARKED".equals(h.status()) && h.sentToRegisterAt() != null,
+                promos.getOrDefault(h.id(), List.of()), promos.getOrDefault(h.id(), List.of()).stream().mapToLong(SalePromotionView::discountMinor).sum())).collect(Collectors.toList());
+    }
+
+    private boolean activeLock(java.sql.ResultSet rs) throws java.sql.SQLException {
+        Timestamp until = rs.getTimestamp("locked_until");
+        return until != null && until.toInstant().isAfter(clock.instant());
+    }
+
+    /** «Por cobrar en caja» (ADR 0015): las cuentas enviadas a caja que nadie ha cobrado ni anulado, de la más vieja a la más nueva. Cualquier rol las ve. */
+    public List<SaleView> registerQueue(MemberContext ctx) {
+        return load(ctx.businessId(), "s.status = 'PARKED' AND s.sent_to_register_at IS NOT NULL", Map.of(), " ORDER BY s.sent_to_register_at, s.id LIMIT 200", 200);
     }
 
     private static MemberRef ref(java.sql.ResultSet rs, String idCol, String nameCol) throws java.sql.SQLException {
