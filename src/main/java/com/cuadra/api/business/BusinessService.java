@@ -68,12 +68,14 @@ public class BusinessService {
                                  /** País (código ISO de 2 letras): da el prefijo de WhatsApp y las sugerencias; se puede corregir cuando sea. */
                                  String country,
                                  /** Cobro en caja (ADR 0015). */
-                                 Boolean registerCheckout) {
+                                 Boolean registerCheckout,
+                                 /** Al apagar «Cobro en caja» con cuentas por cobrar: true = anularlas (ADR 0015). */
+                                 Boolean confirmDiscardPending) {
         public UpdateBusiness(String name, String type, String currency, String timezone, String defaultLocale, String dayCutoff, Map<String, Boolean> modules,
                               List<String> posViews, Boolean creditRequiresCustomer, Integer creditDefaultDueDays, Integer creditOverdueDays, Boolean creditLimitEnforced,
                               Boolean shiftRequired, Long shiftNoteThresholdMinor, Boolean clearCreditDefaultDueDays, Boolean clearShiftNoteThreshold, String country) {
             this(name, type, currency, timezone, defaultLocale, dayCutoff, modules, posViews, creditRequiresCustomer, creditDefaultDueDays, creditOverdueDays,
-                    creditLimitEnforced, shiftRequired, shiftNoteThresholdMinor, clearCreditDefaultDueDays, clearShiftNoteThreshold, country, null);
+                    creditLimitEnforced, shiftRequired, shiftNoteThresholdMinor, clearCreditDefaultDueDays, clearShiftNoteThreshold, country, null, null);
         }
 
         public UpdateBusiness(String name, String type, String currency, String timezone, String defaultLocale, String dayCutoff, Map<String, Boolean> modules,
@@ -238,6 +240,33 @@ public class BusinessService {
                 .param("b", businessId).param("f", from).param("tz", zone.getId()).param("cut", cutoff).param("u", userId, java.sql.Types.OTHER).update();
     }
 
+    /** Apagar «Cobro en caja» (ADR 0015): las cuentas por cobrar no se quedan invisibles; se piden confirmar y se anulan con auditoría. */
+    private void discardPendingRegisterTickets(UUID businessId, UUID memberId, UUID userId, boolean confirmed) {
+        record P(UUID id, long total, boolean locked) {}
+        Timestamp now = Timestamp.from(clock.instant());
+        List<P> pending = jdbc.sql("""
+                SELECT id, total_minor, (locked_until IS NOT NULL AND locked_until > :now) AS locked FROM sale
+                WHERE business_id = :b AND status = 'PARKED' AND sent_to_register_at IS NOT NULL ORDER BY id FOR UPDATE
+                """).param("b", businessId).param("now", now)
+                .query((rs, i) -> new P(rs.getObject("id", UUID.class), rs.getLong("total_minor"), rs.getBoolean("locked"))).list();
+        if (pending.isEmpty()) return;
+        if (!confirmed) {
+            throw ApiException.conflict("REGISTER_QUEUE_NOT_EMPTY", "There are tickets pending at the register").with("count", pending.size())
+                    .with("totalMinor", pending.stream().mapToLong(P::total).sum());
+        }
+        if (pending.stream().anyMatch(P::locked)) {
+            throw ApiException.conflict("REGISTER_QUEUE_BUSY", "Someone is charging a ticket right now; try again in a moment");
+        }
+        for (P t : pending) {
+            jdbc.sql("""
+                    UPDATE sale SET status = 'CANCELLED', cancelled_by_member_id = :m, cancelled_at = :now, cancel_reason = :r, locked_by_device_id = NULL,
+                           locked_until = NULL, locked_by_member_id = NULL, updated_at = :now, rev = nextval('change_rev_seq') WHERE id = :id AND business_id = :b
+                    """).param("m", memberId).param("now", now).param("r", "Cobro en caja desactivado").param("id", t.id()).param("b", businessId).update();
+            audit.log(businessId, memberId, userId, null, "sale.register_cancel", "sale", t.id(), "PARKED: Cobro en caja desactivado");
+        }
+        push.requestSync(businessId);
+    }
+
     /** Actualización parcial: solo cambia lo que llega. Los módulos se mezclan con los actuales. */
     @Transactional
     public BusinessView update(UUID businessId, UUID memberId, UUID userId, UpdateBusiness req) {
@@ -295,6 +324,9 @@ public class BusinessService {
         set(sets, params, "credit_limit_enforced", req.creditLimitEnforced());
         set(sets, params, "shift_required", req.shiftRequired());
         set(sets, params, "shift_note_threshold_minor", req.shiftNoteThresholdMinor());
+        if (Boolean.FALSE.equals(req.registerCheckout()) && current.registerCheckout()) {
+            discardPendingRegisterTickets(businessId, memberId, userId, Boolean.TRUE.equals(req.confirmDiscardPending()));
+        }
         set(sets, params, "register_checkout", req.registerCheckout());
         if (Boolean.TRUE.equals(req.clearCreditDefaultDueDays()) && req.creditDefaultDueDays() == null) sets.add("credit_default_due_days = NULL");
         if (Boolean.TRUE.equals(req.clearShiftNoteThreshold()) && req.shiftNoteThresholdMinor() == null) sets.add("shift_note_threshold_minor = NULL");

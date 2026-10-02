@@ -5,6 +5,7 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -179,5 +180,39 @@ class RegisterCheckoutTest extends ApiTestBase {
         assertEquals(0, seen);
         // Y A no puede cobrarla ni anularla por su ruta.
         call(post("/api/b/" + a + "/sales/" + id + "/cancel"), bearer(ownerA), "{\"reason\":\"no es mía\"}").andExpect(status().isNotFound());
+    }
+
+    @Test
+    void turningOffNeedsConfirmationAndCancelsPendingTickets() throws Exception {
+        String owner = login("rc-h");
+        UUID b = createBusiness(owner, "Cobro en caja H");
+        UUID kevin = createPinMember(owner, b, "Kevin", "CASHIER");
+        String phone = linkDevice(owner, b);
+        // Sin cuentas pendientes: se apaga sin preguntar.
+        turnOn(owner, b, true);
+        turnOn(owner, b, false);
+        turnOn(owner, b, true);
+        UUID one = UUID.randomUUID();
+        UUID two = UUID.randomUUID();
+        asDevice(put(url(b, one)), phone, kevin, sent(SaleTest.item("Café", 3000, 1000), "Mesa 1")).andExpect(status().isCreated());
+        asDevice(put(url(b, two)), phone, kevin, sent(SaleTest.item("Pollo", 12000, 1000), "Mesa 2")).andExpect(status().isCreated());
+
+        call(put("/api/b/" + b), bearer(owner), "{\"registerCheckout\":false}").andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code", is("REGISTER_QUEUE_NOT_EMPTY"))).andExpect(jsonPath("$.count", is(2))).andExpect(jsonPath("$.totalMinor", is(15000)));
+        call(get("/api/b/" + b), bearer(owner), null).andExpect(jsonPath("$.registerCheckout", is(true)));
+        call(get("/api/b/" + b + "/sales/register-queue"), bearer(owner), null).andExpect(jsonPath("$", hasSize(2)));
+
+        // Una cuenta que alguien está cobrando bloquea el apagado.
+        asDevice(post(url(b, one) + "/lock"), phone, kevin, null).andExpect(status().isOk());
+        call(put("/api/b/" + b), bearer(owner), "{\"registerCheckout\":false,\"confirmDiscardPending\":true}").andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code", is("REGISTER_QUEUE_BUSY")));
+        asDevice(delete(url(b, one) + "/lock"), phone, kevin, null).andExpect(status().isNoContent());
+
+        call(put("/api/b/" + b), bearer(owner), "{\"registerCheckout\":false,\"confirmDiscardPending\":true}").andExpect(status().isOk())
+                .andExpect(jsonPath("$.registerCheckout", is(false)));
+        call(get("/api/b/" + b + "/sales/register-queue"), bearer(owner), null).andExpect(jsonPath("$", hasSize(0)));
+        call(get(url(b, one)), bearer(owner), null).andExpect(jsonPath("$.status", is("CANCELLED"))).andExpect(jsonPath("$.cancelReason", is("Cobro en caja desactivado")));
+        long audited = baseJdbc.sql("SELECT count(*) FROM audit_log WHERE business_id = :b AND action = 'sale.register_cancel'").param("b", b).query(Long.class).single();
+        assertEquals(2, audited);
     }
 }

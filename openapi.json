@@ -5232,6 +5232,9 @@
           "clearShiftNoteThreshold" : {
             "type" : [ "boolean", "null" ]
           },
+          "confirmDiscardPending" : {
+            "type" : [ "boolean", "null" ]
+          },
           "country" : {
             "type" : [ "string", "null" ]
           },

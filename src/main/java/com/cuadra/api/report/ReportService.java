@@ -330,16 +330,17 @@ public class ReportService {
                 .query((rs, n) -> new MethodAmount(rs.getString(1), rs.getLong(2))).list();
     }
 
-    /** by = member | register | method | hour | day */
+    /** by = member (quien cobró) | member_served (quien atendió: la envió a caja o la tomó) | register | method | hour | day */
     public List<Row> breakdown(MemberContext ctx, Range r, String by) {
         ctx.require(Permission.VIEW_REPORTS);
         String sql = switch (by) {
             case "member" -> "SELECT s.completed_by_member_id::text, coalesce(m.display_name, '—'), count(*), sum(s.total_minor) FROM sale s LEFT JOIN member m ON m.id = s.completed_by_member_id WHERE " + SALE_IN_RANGE + " GROUP BY 1, 2 ORDER BY 4 DESC";
+            case "member_served" -> "SELECT coalesce(s.sent_by_member_id, s.created_by_member_id)::text, coalesce(m.display_name, '—'), count(*), sum(s.total_minor) FROM sale s LEFT JOIN member m ON m.id = coalesce(s.sent_by_member_id, s.created_by_member_id) WHERE " + SALE_IN_RANGE + " GROUP BY 1, 2 ORDER BY 4 DESC";
             case "register" -> "SELECT s.cash_register_id::text, coalesce(c.name, '—'), count(*), sum(s.total_minor) FROM sale s LEFT JOIN cash_register c ON c.id = s.cash_register_id WHERE " + SALE_IN_RANGE + " GROUP BY 1, 2 ORDER BY 4 DESC";
             case "method" -> "SELECT p.method, p.method, count(DISTINCT s.id), sum(p.amount_minor) FROM sale_payment p JOIN sale s ON s.id = p.sale_id WHERE " + SALE_IN_RANGE + " GROUP BY 1, 2 ORDER BY 4 DESC";
             case "hour" -> "SELECT lpad(extract(hour FROM s.completed_at AT TIME ZONE :tz)::int::text, 2, '0'), lpad(extract(hour FROM s.completed_at AT TIME ZONE :tz)::int::text, 2, '0') || ':00', count(*), sum(s.total_minor) FROM sale s WHERE " + SALE_IN_RANGE + " GROUP BY 1, 2 ORDER BY 1";
             case "day" -> "SELECT " + businessDate("s.completed_at") + "::text, " + businessDate("s.completed_at") + "::text, count(*), sum(s.total_minor) FROM sale s WHERE " + SALE_IN_RANGE + " GROUP BY 1, 2 ORDER BY 1";
-            default -> throw ApiException.badRequest("INVALID_GROUPING", "Group by member, register, method, hour or day");
+            default -> throw ApiException.badRequest("INVALID_GROUPING", "Group by member, member_served, register, method, hour or day");
         };
         return q(sql, ctx.businessId(), r).query((rs, n) -> new Row(rs.getString(1), rs.getString(2), rs.getLong(3), rs.getLong(4))).list();
     }

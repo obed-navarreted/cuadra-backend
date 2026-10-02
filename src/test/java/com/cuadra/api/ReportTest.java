@@ -106,6 +106,24 @@ class ReportTest extends ApiTestBase {
     }
 
     @Test
+    void breakdownServedGroupsByWhoSentOrTookTheTicketWhileMemberKeepsGroupingByWhoCharged() throws Exception {
+        String owner = login("rptc");
+        UUID b = seed(owner);
+        UUID kevin = createPinMember(owner, b, "Kevin", "CASHIER");
+        UUID ana = createPinMember(owner, b, "Ana", "CASHIER");
+        // La venta del 21 la envió Kevin a caja (y la cobró el dueño); la de 25000 la tomó Ana; la tercera no cambia (created_by = quien la hizo).
+        jdbc.sql("UPDATE sale SET sent_by_member_id = :m WHERE business_id = :b AND total_minor = 14000 AND completed_at >= '2026-09-21T00:00:00Z'").param("m", kevin).param("b", b).update();
+        jdbc.sql("UPDATE sale SET created_by_member_id = :m WHERE business_id = :b AND total_minor = 25000").param("m", ana).param("b", b).update();
+        call(get(base(b) + "/reports/sales/breakdown?by=member&" + RANGE), bearer(owner), null).andExpect(jsonPath("$", hasSize(1))).andExpect(jsonPath("$[0].totalMinor", is(53000)));
+        call(get(base(b) + "/reports/sales/breakdown?by=member_served&" + RANGE), bearer(owner), null).andExpect(jsonPath("$", hasSize(3)))
+                .andExpect(jsonPath("$[0].label", is("Ana"))).andExpect(jsonPath("$[0].count", is(1))).andExpect(jsonPath("$[0].totalMinor", is(25000)))
+                .andExpect(jsonPath("$[?(@.label == 'Kevin')].totalMinor", contains(14000)));
+        long sum = jdbc.sql("SELECT sum(total_minor) FROM sale WHERE business_id = :b AND status = 'COMPLETED'").param("b", b).query(Long.class).single();
+        assertEquals(53000L, sum);
+        call(get(base(b) + "/reports/sales/breakdown.csv?by=member_served&" + RANGE), bearer(owner), null).andExpect(status().isOk());
+    }
+
+    @Test
     void breakdownsByMemberRegisterMethodHourAndDay() throws Exception {
         String owner = login("rptb");
         UUID b = seed(owner);
