@@ -11,7 +11,7 @@ public enum Role {
     ADMIN(EnumSet.of(
             Permission.VIEW_MEMBERS, Permission.MANAGE_CASHIERS,
             Permission.MANAGE_DEVICES, Permission.SELL, Permission.VIEW_REPORTS, Permission.MANAGE_CATALOG, Permission.MANAGE_ADMINS,
-            Permission.PROGRAM_NOTIFICATIONS, Permission.VIEW_SETTINGS, Permission.EDIT_BUSINESS, Permission.EDIT_PRODUCTS, Permission.EDIT_SALES, Permission.MANAGE_CREDIT, Permission.MANAGE_EXPENSES, Permission.MANAGE_STOCK)),
+            Permission.PROGRAM_NOTIFICATIONS, Permission.VIEW_SETTINGS, Permission.EDIT_BUSINESS, Permission.VIEW_ACTIVITY, Permission.EDIT_PRODUCTS, Permission.EDIT_SALES, Permission.MANAGE_CREDIT, Permission.MANAGE_EXPENSES, Permission.MANAGE_STOCK)),
     CASHIER(EnumSet.of(Permission.VIEW_MEMBERS, Permission.SELL, Permission.VIEW_SETTINGS, Permission.EDIT_PRODUCTS));
 
     public enum Permission {
@@ -37,6 +37,8 @@ public enum Role {
         /** Ajustes del negocio (nombre, módulos, cobro en caja, reglas, notificaciones...). Dueño y admin. */
         EDIT_BUSINESS,
         /** Código de acceso del negocio (renovar o elegir uno). Solo el dueño. */
+        /** Historial de actividad del negocio (quién hizo qué). Dueño y admin; el de la plataforma es aparte. */
+        VIEW_ACTIVITY,
         MANAGE_ACCESS_CODE,
         MANAGE_PLAN,
         DELETE_BUSINESS,

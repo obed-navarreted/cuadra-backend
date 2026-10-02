@@ -80,7 +80,8 @@ class PinElevationTest extends ApiTestBase {
                 .andExpect(jsonPath("$.results[0].status", is("APPLIED")));
         assertCode(asDevice(get("/api/b/" + b + "/devices"), phone, ana, null).andExpect(status().isForbidden()), "PIN_VERIFICATION_REQUIRED");
         assertCode(asDevice(post("/api/b/" + b + "/members"), phone, ana, "{\"displayName\":\"Luis\",\"role\":\"CASHIER\",\"pin\":\"71717\"}").andExpect(status().isForbidden()), "PIN_VERIFICATION_REQUIRED");
-        assertCode(asDevice(get("/api/b/" + b + "/activity"), phone, ownerMember, null).andExpect(status().isForbidden()), "PIN_VERIFICATION_REQUIRED");
+        assertCode(asDevice(get("/api/b/" + b + "/activity"), phone, ana, null).andExpect(status().isForbidden()), "PIN_VERIFICATION_REQUIRED");
+        assertCode(asDevice(get("/api/b/" + b + "/activity"), phone, kevin, null).andExpect(status().isForbidden()), "FORBIDDEN");
         // Kevin (cajero) sigue recibiendo el FORBIDDEN de siempre: no hay PIN que confirmar.
         assertCode(asDevice(get("/api/b/" + b + "/devices"), phone, kevin, null).andExpect(status().isForbidden()), "FORBIDDEN");
 
@@ -88,6 +89,7 @@ class PinElevationTest extends ApiTestBase {
         verify(phone, ana, pinOf(b, "Ana")).andExpect(status().isOk()).andExpect(jsonPath("$.role", is("ADMIN"))).andExpect(jsonPath("$.baseRole", is("CASHIER")))
                 .andExpect(jsonPath("$.expiresAt", notNullValue()));
         asDevice(get("/api/b/" + b + "/devices"), phone, ana, null).andExpect(status().isOk());
+        asDevice(get("/api/b/" + b + "/activity"), phone, ana, null).andExpect(status().isOk());
         asDevice(post("/api/b/" + b + "/members"), phone, ana, "{\"displayName\":\"Luis\",\"role\":\"CASHIER\",\"pin\":\"71717\"}").andExpect(status().isCreated());
         asDevice(post("/api/b/" + b + "/sync/push"), phone, ana, push(opBy(ana, Instant.now(), "CASH_MOVEMENT_UPSERT", UUID.randomUUID(), WITHDRAWAL)))
                 .andExpect(jsonPath("$.results[0].status", is("APPLIED")));

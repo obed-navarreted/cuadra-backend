@@ -17,7 +17,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-/** Registro de actividad del negocio, solo para su dueño: incluye cuando la plataforma miró el negocio ("Ver como") con su motivo. */
+/** Registro de actividad del negocio, para su dueño y sus administradores (solo lectura; el cajero no la ve): incluye cuando la plataforma miró el negocio ("Ver como") con su motivo. */
 @RestController
 @RequestMapping("/api/b/{businessId}/activity")
 public class ActivityController {
@@ -36,7 +36,7 @@ public class ActivityController {
                                             @RequestHeader(value = Access.MEMBER_HEADER, required = false) UUID memberId,
                                             @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "50") int size) {
         MemberContext ctx = access.member(actor, businessId, memberId);
-        ctx.requireRole(Role.OWNER);   // solo el dueño ve la actividad
+        ctx.require(Role.Permission.VIEW_ACTIVITY);   // dueño y admin (solo lectura); el cajero no
         int p = Math.max(page, 0);
         int s = Math.min(Math.max(size, 1), 100);
         long total = jdbc.sql("SELECT count(*) FROM audit_log WHERE business_id = :b").param("b", businessId).query(Long.class).single();

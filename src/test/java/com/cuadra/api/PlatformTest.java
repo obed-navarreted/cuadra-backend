@@ -98,11 +98,13 @@ class PlatformTest extends ApiTestBase {
         // Caduca a los 30 minutos.
         jdbc.sql("UPDATE auth_session SET expires_at = now() - interval '1 minute' WHERE kind = 'VIEW_AS' AND view_as_business_id = :b").param("b", biz).update();
         call(get(b(biz) + "/plan"), bearer(viewer), null).andExpect(status().isUnauthorized());
-        // El dueño lo ve en su actividad, con el motivo; el resto del equipo no la ve.
+        // El dueño lo ve en su actividad, con el motivo; un admin también (solo lectura); el cajero no.
         call(get(b(biz) + "/activity"), bearer(owner), null).andExpect(status().isOk()).andExpect(jsonPath("$.items[0].action", is("platform.view_as")))
                 .andExpect(jsonPath("$.items[0].byPlatform", is(true))).andExpect(jsonPath("$.items[0].detail", containsString("caso de soporte 123")));
         String cashierToken = joinAs(owner, biz, "plt-c3", "CASHIER");
         call(get(b(biz) + "/activity"), bearer(cashierToken), null).andExpect(status().isForbidden());
+        String adminToken = joinAs(owner, biz, "plt-a3", "ADMIN");
+        call(get(b(biz) + "/activity"), bearer(adminToken), null).andExpect(status().isOk()).andExpect(jsonPath("$.items[0].action", is("platform.view_as")));
         // Y en la auditoría de la plataforma.
         call(get("/api/platform/audit"), bearer(root), null).andExpect(jsonPath("$.items[?(@.action=='platform.view_as')]", hasSize(greaterThanOrEqualTo(1))));
     }

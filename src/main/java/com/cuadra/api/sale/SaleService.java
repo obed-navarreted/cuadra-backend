@@ -383,9 +383,10 @@ public class SaleService {
             throw locked(row.lockedMember);
         }
         boolean completing = "COMPLETED".equals(n.status);
-        // Enviada (o reenviada) a caja: cuándo y quién. Vuelta a cuenta común: se borra. Cobrada o sin cambio: se conserva (quién la envió queda en la venta).
+        // Enviada (o reenviada) a caja: cuándo y quién. Reenviada con productos agregados: conserva CUÁNDO llegó (no pierde su lugar en la lista, la que más espera
+        // primero) y pasa a decir quién la reenvió. Vuelta a cuenta común: se borra. Cobrada o sin cambio: se conserva (quién la envió queda en la venta).
         String sent = "PARKED".equals(n.status) && Boolean.TRUE.equals(in.sendToRegister()) && n.pendingCheckout
-                ? "sent_to_register_at = :now, sent_by_member_id = :me,"
+                ? "sent_to_register_at = COALESCE(sent_to_register_at, :now), sent_by_member_id = :me,"
                 : "PARKED".equals(n.status) && !n.pendingCheckout ? "sent_to_register_at = NULL, sent_by_member_id = NULL," : "";
         UUID day = completing ? days.idFor(ctx.businessId(), n.completedAt) : null;
         jdbc.sql("""

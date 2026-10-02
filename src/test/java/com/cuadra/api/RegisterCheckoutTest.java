@@ -102,7 +102,7 @@ class RegisterCheckoutTest extends ApiTestBase {
     }
 
     @Test
-    void addingProductsKeepsItPendingAndResendingUpdatesWhoSentIt() throws Exception {
+    void addingProductsKeepsItPendingAndItsPlaceAndResendingUpdatesWhoSentIt() throws Exception {
         String owner = login("rc-c");
         UUID b = createBusiness(owner, "Cobro en caja C");
         UUID kevin = createPinMember(owner, b, "Kevin", "CASHIER");
@@ -110,12 +110,20 @@ class RegisterCheckoutTest extends ApiTestBase {
         String phone = linkDevice(owner, b);
         turnOn(owner, b, true);
         UUID id = UUID.randomUUID();
-        asDevice(put(url(b, id)), phone, kevin, sent(SaleTest.item("Café", 3000, 1000), "Mesa 2")).andExpect(status().isCreated());
+        String firstSentAt = com.jayway.jsonpath.JsonPath.read(asDevice(put(url(b, id)), phone, kevin, sent(SaleTest.item("Café", 3000, 1000), "Mesa 2"))
+                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString(), "$.sentToRegisterAt");
+        UUID later = UUID.randomUUID();
+        Thread.sleep(20);
+        asDevice(put(url(b, later)), phone, kevin, sent(SaleTest.item("Té", 2000, 1000), "Mesa 5")).andExpect(status().isCreated());
         // Apartada otra vez sin decir nada (versión vieja, o se retomó y se apartó): sigue por cobrar en caja.
         asDevice(put(url(b, id)), phone, kevin, SaleTest.sale("PARKED", SaleTest.item("Café", 3000, 2000), "", "\"label\":\"Mesa 2\""))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.pendingCheckout", is(true))).andExpect(jsonPath("$.sentBy.name", is("Kevin")));
         asDevice(put(url(b, id)), phone, ana, sent(SaleTest.item("Café", 3000, 3000), "Mesa 2"))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.sentBy.name", is("Ana"))).andExpect(jsonPath("$.totalMinor", is(9000)));
+                .andExpect(status().isOk()).andExpect(jsonPath("$.sentBy.name", is("Ana"))).andExpect(jsonPath("$.totalMinor", is(9000)))
+                // Con productos agregados y reenviada conserva cuándo llegó: sigue antes que la mesa que llegó después.
+                .andExpect(jsonPath("$.sentToRegisterAt", is(firstSentAt)));
+        call(get("/api/b/" + b + "/sales/register-queue"), bearer(owner), null)
+                .andExpect(jsonPath("$[0].id", is(id.toString()))).andExpect(jsonPath("$[1].id", is(later.toString())));
         // Explícitamente de vuelta a cuenta común.
         asDevice(put(url(b, id)), phone, ana, SaleTest.sale("PARKED", SaleTest.item("Café", 3000, 3000), "", "\"label\":\"Mesa 2\",\"sendToRegister\":false"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.pendingCheckout", is(false))).andExpect(jsonPath("$.sentToRegisterAt", nullValue()));
