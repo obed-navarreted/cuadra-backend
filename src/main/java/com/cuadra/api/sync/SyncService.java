@@ -421,9 +421,13 @@ public class SyncService {
     /** `pendingOps`: lo que el teléfono aún tiene sin enviar al bajar (ya después de subir): el cierre del día avisa con este número. */
     public PullResult pull(MemberContext ctx, boolean device, long since, int limit, Integer pendingOps) {
         limit = Math.max(1, Math.min(limit, 500));
+        // ADR 0017: el cursor es del TELÉFONO, no de la persona. Un teléfono compartido pasa de un cajero a un admin por PIN; si el filtro dependiera de
+        // quién pide, las filas que el cajero se saltó nunca llegarían al admin. Por eso el teléfono baja el negocio completo (menos cuentas abiertas
+        // ajenas) y es la app quien limita lo que ve un cajero. Quien no es un teléfono (REST con sesión) sí se filtra por persona.
         boolean cashier = ctx.role() == Role.CASHIER;
-        String saleFilter = cashier
-                ? "(s.status = 'PARKED' OR s.created_by_member_id = :me OR s.completed_by_member_id = :me)"
+        boolean narrow = cashier && !device;
+        String saleFilter = narrow
+                ? "(s.status = 'PARKED' OR ((s.created_by_member_id = :me OR s.completed_by_member_id = :me) AND coalesce(s.completed_at, s.created_at) >= :since))"
                 : "(s.status <> 'OPEN' OR s.created_by_member_id = :me)";
         var rows = jdbc.sql("""
                         SELECT rev, t, id FROM (
@@ -449,7 +453,7 @@ public class SyncService {
                           UNION ALL SELECT s.rev, 'sale', s.id FROM sale s WHERE s.business_id = :b AND s.rev > :s AND\n                          """ + saleFilter + """
                         ) x ORDER BY rev LIMIT :n
                         """)
-                .param("b", ctx.businessId()).param("s", since).param("me", ctx.memberId()).param("all", !cashier).param("n", limit + 1).param("dev", ctx.deviceId(), java.sql.Types.OTHER)
+                .param("b", ctx.businessId()).param("s", since).param("me", ctx.memberId()).param("all", !cashier).param("since", java.sql.Timestamp.from(clock.instant().minus(SaleService.CASHIER_WINDOW))).param("n", limit + 1).param("dev", ctx.deviceId(), java.sql.Types.OTHER)
                 .query((rs, i) -> new Object[] {rs.getLong("rev"), rs.getString("t"), rs.getObject("id", UUID.class)}).list();
         boolean hasMore = rows.size() > limit;
         if (hasMore) rows = rows.subList(0, limit);

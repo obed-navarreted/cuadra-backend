@@ -35,6 +35,8 @@ public class SaleService {
     private static final Duration CLOCK_SKEW = Duration.ofMinutes(5);
     /** Un cajero puede anular su ÚLTIMA venta durante estos minutos (con motivo y aviso al dueño); después, solo dueño y admins. */
     public static final Duration UNDO_WINDOW = Duration.ofMinutes(5);
+    /** ADR 0017: un cajero solo ve sus propias ventas de los últimos 60 minutos (hora del servidor). Dueño y admin no tienen límite. */
+    public static final Duration CASHIER_WINDOW = Duration.ofMinutes(60);
     /** Margen por segundos de red o de pantalla al comparar con la ventana. */
     static final Duration UNDO_TOLERANCE = Duration.ofSeconds(30);
     /** Una anulación hecha sin conexión dentro de la ventana puede llegar tarde, pero no días después. */
@@ -659,8 +661,15 @@ public class SaleService {
     /** Un cajero ve las cuentas apartadas del negocio y sus propias ventas; dueño y admins ven todo. */
     public boolean visible(MemberContext ctx, SaleView v) {
         if (ctx.role() != Role.CASHIER) return true;
-        return "PARKED".equals(v.status()) || (v.createdBy() != null && v.createdBy().id().equals(ctx.memberId()))
+        if ("PARKED".equals(v.status())) return true;
+        boolean own = (v.createdBy() != null && v.createdBy().id().equals(ctx.memberId()))
                 || (v.completedBy() != null && v.completedBy().id().equals(ctx.memberId()));
+        return own && cashierWindow(clock.instant(), v.completedAt() != null ? v.completedAt() : v.createdAt());
+    }
+
+    /** ¿Entra `stamp` (cobro, o creación si no está cobrada) en la ventana del cajero? Exactamente 60:00 todavía entra; 60:01 ya no. */
+    public static boolean cashierWindow(Instant now, Instant stamp) {
+        return stamp != null && !stamp.isBefore(now.minus(CASHIER_WINDOW));
     }
 
     public SaleView get(MemberContext ctx, UUID id) {
@@ -683,6 +692,8 @@ public class SaleService {
         BusinessDayService.Info info = days.info(ctx.businessId());
         StringBuilder where = new StringBuilder("1=1");
         Map<String, Object> params = new LinkedHashMap<>();
+        // ADR 0017: un cajero no filtra por fecha, estado, hora, persona ni método: solo ve lo suyo de la última hora, pida lo que pida.
+        if (ctx.role() == Role.CASHIER) f = new Filter(null, null, null, null, null, null, null);
         if (f.status() != null) {
             where.append(" AND s.status = :status");
             params.put("status", f.status());
@@ -712,8 +723,9 @@ public class SaleService {
             params.put("method", f.method());
         }
         if (ctx.role() == Role.CASHIER) {
-            where.append(" AND (s.status = 'PARKED' OR s.created_by_member_id = :me OR s.completed_by_member_id = :me)");
+            where.append(" AND (s.status = 'PARKED' OR ((s.created_by_member_id = :me OR s.completed_by_member_id = :me) AND coalesce(s.completed_at, s.created_at) >= :since))");
             params.put("me", ctx.memberId());
+            params.put("since", Timestamp.from(clock.instant().minus(CASHIER_WINDOW)));
         }
         String clause = where.toString();
         var count = jdbc.sql("SELECT count(*) FROM sale s WHERE s.business_id = :b AND " + clause).param("b", ctx.businessId());
@@ -724,13 +736,14 @@ public class SaleService {
         return PageResponse.of(items, page, size, total);
     }
 
-    /** Resumen de una jornada comercial. Un cajero solo ve lo que él cobró. */
+    /** Resumen de una jornada comercial. Un cajero solo ve lo que él cobró en la última hora (ignora `date`, ADR 0017). */
     public Summary summary(MemberContext ctx, LocalDate date) {
         BusinessDayService.Info info = days.info(ctx.businessId());
-        LocalDate day = date != null ? date : info.dateOf(clock.instant());
-        Timestamp start = Timestamp.from(info.startOf(day));
-        Timestamp end = Timestamp.from(info.endOf(day));
         boolean own = ctx.role() == Role.CASHIER;
+        Instant now = clock.instant();
+        LocalDate day = own || date == null ? info.dateOf(now) : date;
+        Timestamp start = Timestamp.from(own ? now.minus(CASHIER_WINDOW) : info.startOf(day));
+        Timestamp end = Timestamp.from(own ? now.plusSeconds(1) : info.endOf(day));
         String mine = own ? " AND s.completed_by_member_id = :me" : "";
         var byMethodQ = jdbc.sql("""
                         SELECT p.method, sum(p.amount_minor) AS total FROM sale_payment p JOIN sale s ON s.id = p.sale_id

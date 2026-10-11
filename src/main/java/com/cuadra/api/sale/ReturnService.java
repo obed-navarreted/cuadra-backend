@@ -118,8 +118,10 @@ public class ReturnService {
             boolean own = ctx.memberId() != null && ctx.memberId().equals(sale[2]);
             boolean sameDay = info.dateOf(completedAt).equals(info.dateOf(at));
             boolean recent = !info.dateOf(completedAt).isBefore(info.dateOf(now).minusDays(1));
-            if (!own || !sameDay || !recent) {
-                throw ApiException.forbidden("RETURN_NOT_ALLOWED", "A cashier can only return their own sales of the same day; ask the owner or an admin")
+            // ADR 0017: tampoco puede alcanzar lo que no ve (su ventana es de 60 minutos).
+            boolean visible = SaleService.cashierWindow(now, completedAt);
+            if (!own || !sameDay || !recent || !visible) {
+                throw ApiException.forbidden("RETURN_NOT_ALLOWED", "A cashier can only return their own sales of the last hour (same day); ask the owner or an admin")
                         .with("reason", !own ? "NOT_OWN" : "OTHER_DAY");
             }
         }

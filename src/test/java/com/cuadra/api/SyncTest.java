@@ -1,6 +1,7 @@
 package com.cuadra.api;
 
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
@@ -144,8 +145,9 @@ class SyncTest extends ApiTestBase {
                 op(UUID.randomUUID(), "SALE_UPSERT", parked, SaleTest.sale("PARKED", it, "", "")),
                 op(UUID.randomUUID(), "SALE_UPSERT", open, SaleTest.sale("OPEN", it, "", "")))).andExpect(status().isOk());
 
+        // ADR 0017: el teléfono baja todo (el cursor es suyo); la app limita lo que ve un cajero. Las abiertas de otros no salen.
         asDevice(get("/api/b/" + b + "/sync/pull?since=0"), device, kevin, null)
-                .andExpect(jsonPath("$.changes[?(@.type=='sale')].data.id", contains(parked.toString())));
+                .andExpect(jsonPath("$.changes[?(@.type=='sale')].data.id", containsInAnyOrder(parked.toString(), hers.toString())));
         asDevice(get("/api/b/" + b + "/sync/pull?since=0"), device, luisa, null)
                 .andExpect(jsonPath("$.changes[?(@.type=='sale')]", hasSize(3)));
         call(get("/api/b/" + b + "/sync/pull?since=0"), bearer(owner), null)
